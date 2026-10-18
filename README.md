@@ -2,9 +2,9 @@
 
 English: [README.en.md](README.en.md)。
 
-**Video Workbench 0.2.4 预览版**
+**Video Workbench 0.2.5 预览版**
 
-[直接下载 Windows 64 位 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe) · [下载源码包](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-source.zip) · [所有版本](https://github.com/yaohaijiao86/video-workbench/releases)
+[直接下载 Windows 64 位 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-windows-x64.exe) · [下载源码包](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-source.zip) · [所有版本](https://github.com/yaohaijiao86/video-workbench/releases)
 
 ## 项目目标
 
@@ -25,15 +25,25 @@ Video Workbench 是一个本地优先的视频整理与剪辑辅助工具。它�
 
 ## 下载
 
-- **Windows 64 位执行文件：**[点击直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe)
-- **源码包：**[video-workbench-v0.2.4-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-source.zip)
+- **Windows 64 位执行文件：**[点击直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-windows-x64.exe)
+- **源码包：**[video-workbench-v0.2.5-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-source.zip)
 - **外部工具安装与配置：**[查看中文部署说明](docs/external-tools.md)
 
 执行文件包含 Video Workbench 本身，不包含 FFmpeg、ASR/OCR 工具、场景检测器、模型文件、账号凭据或运行数据。
 
+## Qwen3-ASR 命令模板
+
+设置页的 ASR 命令数组已预置通用 Qwen3-ASR 模板；EXE 内含适配脚本，但不包含 Qwen 推理依赖或模型权重。请在独立 Python 环境中按[官方说明](https://github.com/QwenLM/Qwen3-ASR)安装 `qwen-asr`，再把设置页数组第一项 `python` 改成该环境的 `python.exe` 完整路径。模型字段留空时使用 `Qwen/Qwen3-ASR-1.7B` 与 `Qwen/Qwen3-ForcedAligner-0.6B` 官方模型 ID；也可以填写本机已有的模型目录。
+
+模板示例：
+
+```json
+["python", "{asr_adapter}", "--input", "{audio}", "--output", "{output}", "--model", "{asr_model}", "--aligner", "{asr_aligner}"]
+```
+
 ## 从源码运行
 
-源码运行需要 Python 3.11 或更高版本和现代浏览器。视频导出需要 FFmpeg；转录需要导入字幕或自行配置 ASR 服务。
+源码运行需要 Python 3.11 或更高版本和现代浏览器。视频导出需要 FFmpeg；转录可导入字幕，或安装 `qwen-asr` 后使用预置命令模板。
 
 在项目目录运行：
 

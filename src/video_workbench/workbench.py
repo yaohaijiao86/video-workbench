@@ -1,11 +1,14 @@
 from __future__ import annotations
-import base64, hashlib, html, json, math, os, re, shutil, statistics, threading, time, uuid
+import base64, hashlib, html, json, math, os, re, shutil, statistics, sys, threading, time, uuid
 import unicodedata
 from pathlib import Path
 from .core import normalize_segments, parse_srt, parse_json_object, validate_suggestions, keep_ranges, remap_segments, subtitle_cues, write_srt
 from . import services
 
-DEFAULTS={"ffmpeg":"ffmpeg","ffprobe":"ffprobe","asr_command":[],
+ASR_DEFAULT_COMMAND=["python","{asr_adapter}","--input","{audio}","--output","{output}",
+                     "--model","{asr_model}","--aligner","{asr_aligner}"]
+DEFAULTS={"ffmpeg":"ffmpeg","ffprobe":"ffprobe","asr_command":ASR_DEFAULT_COMMAND,
+          "asr_config_version":"1",
           "qwen3_asr_model":"",
           "qwen3_aligner_model":"",
           "ocr_command":[],"scene_command":[],
@@ -245,6 +248,12 @@ class Workbench:
         self.settings={**DEFAULTS,"model_profiles":[],"model_roles":{"editing":[],"summary":[],"vision":[]}}
         if self.settings_path.exists():
             self.settings.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
+        # Upgrade old installations whose ASR template was intentionally left
+        # empty by earlier releases. Once upgraded, users can still clear it.
+        if str(saved_output_settings.get("asr_config_version",""))!="1":
+            if not saved_output_settings.get("asr_command"):
+                self.settings["asr_command"]=ASR_DEFAULT_COMMAND.copy()
+            self.settings["asr_config_version"]="1"
         if "local_model_lifecycle" not in saved_output_settings:
             # Preserve safe automatic cleanup for the default localhost gateway;
             # unknown or remote local servers require an explicit choice.
@@ -1442,9 +1451,14 @@ class Workbench:
         self.check_cancelled()
         self.status(pid,"running","运行外部 ASR")
         self.progress(pid,"transcribe","running",None,"语音识别中")
+        if getattr(sys,"frozen",False):
+            adapter=Path(getattr(sys,"_MEIPASS",Path(sys.executable).parent))/"asr_adapter"/"asr_qwen3.py"
+        else:
+            adapter=Path(__file__).with_name("asr_qwen3.py")
         result=services.run_asr(self.settings["asr_command"],audio,folder/"asr.json",self.cancel_event,
-            {"asr_model":self.settings.get("qwen3_asr_model",""),
-             "asr_aligner":self.settings.get("qwen3_aligner_model","")})
+            {"asr_adapter":adapter,
+             "asr_model":self.settings.get("qwen3_asr_model","").strip() or "Qwen/Qwen3-ASR-1.7B",
+             "asr_aligner":self.settings.get("qwen3_aligner_model","").strip() or "Qwen/Qwen3-ForcedAligner-0.6B"})
         self.check_cancelled()
         segments=normalize_segments(result,media["duration"])
         if not segments: raise RuntimeError("ASR 没有返回有效片段")

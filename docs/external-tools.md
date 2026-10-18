@@ -1,6 +1,6 @@
 # 外部软件下载与配置
 
-本程序不打包下列外部软件、模型权重或服务。Windows 64 位程序可[直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe)；也可在[所有版本页面](https://github.com/yaohaijiao86/video-workbench/releases)下载源码包。EXE 仅包含 Video Workbench 应用本身，首次启动后仍需按需配置媒体工具、模型服务或模型文件。
+本程序不打包下列外部软件、模型权重或服务。Windows 64 位程序可[直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-windows-x64.exe)；也可在[所有版本页面](https://github.com/yaohaijiao86/video-workbench/releases)下载源码包。EXE 内含 Qwen3-ASR 适配脚本和通用命令模板，但不含 Qwen 推理依赖或模型权重；其他外部软件仍需按需配置。
 
 建议为不同模型准备独立 Python 环境。显存有限时不要同时加载多个大模型；模型效果、识别错误和切点质量应使用你自己的真实视频样本评估。
 
@@ -18,10 +18,10 @@
 python -m pip install -U qwen-asr
 ```
 
-准备 `Qwen3-ASR-1.7B` 与 `Qwen3-ForcedAligner-0.6B` 后，在 ASR 命令配置中调用仓库适配器，并将 `PYTHON` 替换成该环境的 Python 可执行文件路径：
+安装 `qwen-asr` 后，设置页已预置以下通用命令并随 EXE 附带适配脚本。若使用独立环境，将 `python` 替换成该环境的 Python 可执行文件完整路径；模型标识可使用默认官方 ID，也可填本地模型目录：
 
 ```json
-["PYTHON", "PATH_TO_REPOSITORY/examples/asr_qwen3.py", "--input", "{audio}", "--output", "{output}", "--model", "ASR_MODEL_DIRECTORY", "--aligner", "ALIGNER_MODEL_DIRECTORY"]
+["python", "{asr_adapter}", "--input", "{audio}", "--output", "{output}", "--model", "{asr_model}", "--aligner", "{asr_aligner}"]
 ```
 
 适配器支持传入模型标识或本地模型目录。优先中文、方言和字词级时间戳时，可先评估 1.7B 模型加对齐器；较小模型资源需求更低。长音频处理方式和安装限制请以官方文档为准。

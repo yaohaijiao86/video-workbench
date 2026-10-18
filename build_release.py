@@ -69,6 +69,7 @@ def build_executable(version: str) -> Path:
     stem = f"video-workbench-v{version}-windows-x64"
     static_dir = PROJECT_ROOT / "src" / "video_workbench" / "static"
     style_file = PROJECT_ROOT / "src" / "video_workbench" / "document_style.json"
+    asr_adapter = PROJECT_ROOT / "src" / "video_workbench" / "asr_qwen3.py"
     build_dir = PROJECT_ROOT / "build" / "pyinstaller"
     dist_dir = PROJECT_ROOT / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +90,8 @@ def build_executable(version: str) -> Path:
         f"{static_dir};video_workbench/static",
         "--add-data",
         f"{style_file};video_workbench",
+        "--add-data",
+        f"{asr_adapter};asr_adapter",
         "--collect-all",
         "yt_dlp",
         "--collect-all",

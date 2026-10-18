@@ -1,8 +1,8 @@
 # Video Workbench
 
-简体中文说明：[README.md](README.md)。Windows downloads: [executable](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe) · [source archive](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-source.zip).
+简体中文说明：[README.md](README.md)。Windows downloads: [executable](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-windows-x64.exe) · [source archive](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-source.zip).
 
-Video Workbench is a local-first tool for reviewing video transcripts, preparing precise edits, and producing illustrated notes. Version 0.2.4 is a preview release.
+Video Workbench is a local-first tool for reviewing video transcripts, preparing precise edits, and producing illustrated notes. Version 0.2.5 is a preview release.
 
 ## Project goals
 
@@ -15,6 +15,7 @@ Video Workbench is a local-first tool for reviewing video transcripts, preparing
 
 - Import MP4, MOV, MKV, and WEBM files; import local folders; and process multiple videos in batches.
 - Import SRT or WebVTT subtitles, or call a configured ASR command that returns timestamped JSON.
+- The settings page includes a generic Qwen3-ASR command template and its adapter script; install `qwen-asr` separately and point the first command item to that environment's Python executable.
 - Optionally download a Bilibili video and available subtitles; scan a Bilibili app QR code to authenticate.
 - Preview source video in a browser and review transcript segments with timestamp navigation.
 - Request filler-word and repetition suggestions from an OpenAI-compatible chat API. Review and adjust suggested deletions in the transcript editor.
