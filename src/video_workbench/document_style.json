@@ -1,0 +1,16 @@
+{
+  "name": "Apple Dark",
+  "colors": {
+    "background": "#0b0b0d",
+    "surface": "#151517",
+    "raised": "#1c1c1e",
+    "text": "#f5f5f7",
+    "muted": "#a1a1a6",
+    "accent": "#2997ff",
+    "border": "#333336",
+    "note": "#171c24"
+  },
+  "font_stack": "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+  "content_width": "900px",
+  "page_padding": "48px"
+}

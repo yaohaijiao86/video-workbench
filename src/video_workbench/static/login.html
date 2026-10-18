@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>登录 · Video Workbench</title>
+  <link rel="stylesheet" href="/login.css">
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="title">
+      <div class="mark" aria-hidden="true">▶</div>
+      <p class="eyebrow">VIDEO WORKBENCH · LAN</p>
+      <h1 id="title">欢迎回来</h1>
+      <p class="intro">输入服务器访问密码，继续处理视频项目。</p>
+      <form id="login_form">
+        <label for="password">访问密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <p id="error" role="alert" aria-live="polite"></p>
+        <button id="submit" type="submit">登录工作台 <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="footnote">此服务仅供受信任的局域网使用。</p>
+    </section>
+    <footer>Video Workbench <span>·</span> 私有局域网服务</footer>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>
