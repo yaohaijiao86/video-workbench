@@ -1,38 +1,40 @@
 # Video Workbench
 
-Video Workbench is a local-first tool for reviewing video transcripts, preparing precise edits, and producing illustrated notes. Version 0.2.4 is a preview release.
+English: [README.en.md](README.en.md)。
 
-## Project goals
+**Video Workbench 0.2.4 预览版**
 
-- Keep source video and project files under the user's control.
-- Organize transcription, edit suggestions, human review, export, and notes in one workflow.
-- Let users choose their own media tools and language or vision models instead of bundling large external runtimes.
-- Keep suggested cuts reviewable and require a person to approve the final edit.
+[下载 Windows 64 位可执行文件](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe) · [下载源码包](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-source.zip) · [所有版本](https://github.com/yaohaijiao86/video-workbench/releases)
 
-## Features
+## 项目目标
 
-- Import MP4, MOV, MKV, and WEBM files; import local folders; and process multiple videos in batches.
-- Import SRT or WebVTT subtitles, or call a configured ASR command that returns timestamped JSON.
-- Optionally download a Bilibili video and available subtitles; scan a Bilibili app QR code to authenticate.
-- Preview source video in a browser and review transcript segments with timestamp navigation.
-- Request filler-word and repetition suggestions from an OpenAI-compatible chat API. Review and adjust suggested deletions in the transcript editor.
-- Export a trimmed video and retimed SRT subtitles through FFmpeg.
-- Create topic-based summaries and full transcripts as HTML and Markdown. Optional vision, OCR, and scene-detection commands can help select relevant frames.
-- Save projects in the workbench data directory, beside local source files, or in a chosen output directory.
-- Run one project or a batch through transcription, analysis, summaries, and export with visible progress.
+Video Workbench 是一个本地优先的视频整理与剪辑辅助工具。它把转录、剪辑建议、人工审核、导出和图文笔记放在同一套工作流程中，同时让视频、项目文件和模型服务由使用者自行管理。
 
-The core application uses the Python standard library. Bilibili download and QR login require the optional `yt-dlp` and `qrcode` packages. FFmpeg, ASR engines, OCR, scene detection, model servers, and model weights are separate user-managed components.
+## 功能
 
-## Requirements
+- 导入 MP4、MOV、MKV、WEBM 视频，也可导入文件夹并批量处理。
+- 导入 SRT、WebVTT 字幕，或连接能输出带时间戳 JSON 的 ASR 命令。
+- 可选下载 Bilibili 视频和字幕，并通过二维码登录。
+- 在浏览器预览视频，按时间戳查看和校对转录文本。
+- 生成口头语、重复内容等剪辑建议；由使用者审核和调整后再导出。
+- 使用 FFmpeg 导出剪辑视频和同步调整时间轴的 SRT 字幕。
+- 输出 HTML 和 Markdown 格式的主题摘要与全文转录；可选连接视觉模型、OCR 和场景检测工具。
+- 支持单个项目或批次处理，并显示处理进度。
 
-- Python 3.11 or later for a source deployment.
-- A modern browser.
-- FFmpeg for video export. The selected FFmpeg build must include the codecs required by the chosen output settings.
-- An ASR command or imported subtitles for transcription. An OpenAI-compatible chat service is needed for model-generated edit suggestions and summaries.
+核心应用使用 Python 标准库。Bilibili 下载和二维码登录需要可选的 `yt-dlp` 与 `qrcode`。FFmpeg、ASR、OCR、场景检测、模型服务和模型文件需由使用者自行准备。
 
-## Run from source
+## 下载
 
-From the project directory:
+- **Windows 64 位执行文件：**[video-workbench-v0.2.4-windows-x64.exe](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-windows-x64.exe)
+- **源码包：**[video-workbench-v0.2.4-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.4/video-workbench-v0.2.4-source.zip)
+
+执行文件包含 Video Workbench 本身，不包含 FFmpeg、ASR/OCR 工具、场景检测器、模型文件、账号凭据或运行数据。
+
+## 从源码运行
+
+源码运行需要 Python 3.11 或更高版本和现代浏览器。视频导出需要 FFmpeg；转录需要导入字幕或自行配置 ASR 服务。
+
+在项目目录运行：
 
 ```powershell
 python -m venv .venv
@@ -41,47 +43,43 @@ python -m pip install -e .
 python run.py
 ```
 
-Open `http://127.0.0.1:8765` in a browser. The default project data location is `VideoWorkbenchData` in the current user's home directory. Set a different location with `python run.py --data <data-directory>`.
-
-To enable Bilibili downloads and QR login, install the optional components in the same Python environment:
+然后在浏览器打开 `http://127.0.0.1:8765`。如需启用 Bilibili 下载与二维码登录，在相同 Python 环境安装可选依赖：
 
 ```powershell
 python -m pip install -e ".[bilibili]"
 ```
 
-## LAN deployment
+## 局域网部署
 
-The default server listens on the loopback interface. For trusted LAN access, bind to the server's private address and provide a password file and an allow-listed client CIDR. Replace the uppercase placeholders with values for the deployment:
+默认只监听本机回环接口。如需在可信局域网内使用，请为服务器地址、密码文件位置和允许访问的客户端网段填写你自己的值：
 
 ```powershell
 python run.py --host SERVER_PRIVATE_IP --port 8765 --password-file PASSWORD_FILE --allowed-client-cidr TRUSTED_CLIENT_CIDR --data DATA_DIRECTORY
 ```
 
-Restrict inbound firewall access to the same trusted subnet. Do not expose the HTTP service directly to the public internet. Remote browser uploads, processing, and project storage run on the server. Keep the password file, runtime data, model settings, API credentials, and ASR token files outside the source repository.
+请将防火墙入站范围限制在可信网段，不要把 HTTP 服务直接暴露到公网。密码文件、运行数据、模型设置、API 凭据和 ASR token 文件应放在源码目录之外。远程 ASR 部署方式见 [Windows 远程 ASR 说明](docs/remote-asr-windows.md)。
 
-For a separate ASR host, see [Remote ASR deployment](docs/remote-asr-windows.md). Configure the model API, ASR command, FFmpeg, and project output location in the workbench settings for each deployment. API credentials are not included in the source package.
+## 生成源码包和 Windows 执行文件
 
-## Build releases
-
-On 64-bit Windows with Python 3.11 or later, install the build and optional Bilibili dependencies and run the release script:
+在 64 位 Windows 和 Python 3.11 或更高版本上运行：
 
 ```powershell
 python -m pip install -e ".[build,bilibili]"
 python build_release.py
 ```
 
-The script creates a source ZIP and a single-file Windows x64 executable in the parent directory. The executable starts the local web application and defaults to loopback access. It does not include FFmpeg, ASR/OCR software, scene detectors, model weights, API credentials, or runtime data. Use `--output-dir` to choose a different release destination.
+脚本会在项目父目录生成源码 ZIP 和单文件 Windows x64 执行文件。可通过 `--output-dir` 指定其他输出目录。
 
-## Repository layout
+## 项目结构
 
-- `src/video_workbench/` — application, media workflow, integrations, and browser UI.
-- `examples/` — adapters for ASR, OCR, and scene detection.
-- `docs/` — deployment guidance.
-- `tests/` — automated checks.
-- `build_release.py` — source archive and Windows executable builder.
+- `src/video_workbench/`：应用、媒体工作流、服务连接和浏览器界面。
+- `examples/`：ASR、OCR 和场景检测适配示例。
+- `docs/`：部署说明。
+- `tests/`：自动化检查。
+- `build_release.py`：源码包与 Windows 执行文件构建脚本。
 
-## Data and safety
+## 数据与安全
 
-Runtime settings and project files belong in the selected data or output directories. Do not commit real credentials, token files, host addresses, or deployment settings. Model requests may include transcript text and, when enabled, selected video frames; use services that you trust. Review suggested cuts and listen to the exported video before using it.
+项目和运行设置保存在你选择的数据或输出目录中。请勿将真实凭据、token 文件、服务器地址或部署设置提交到仓库。模型请求可能包含转录文本，以及在启用相关功能时选取的视频帧；请只使用你信任的服务。剪辑建议应由人工审核。
 
-The project is licensed under MIT. External tools and models have their own licenses and must be installed and reviewed separately.
+项目使用 MIT 许可证。外部工具和模型遵循各自的许可协议。
