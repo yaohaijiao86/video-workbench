@@ -1026,7 +1026,7 @@ class Workbench:
             if summary.get("mode")=="transcript_only":
                 reason=str(summary.get("fallback_reason") or "").strip()
                 if reason:
-                    raise RuntimeError("图文总结模型调用失败，已回退生成字幕版 HTML："+reason[:500])
+                    return "已生成字幕版 HTML（模型未返回可用章节内容）"
                 return "未配置总结模型，仅生成字幕版 HTML"
             chapters=summary.get("chapters",[])
             return f"已生成图文总结（{len(chapters)} 个主题章节）"
@@ -1765,7 +1765,12 @@ class Workbench:
         except services.OperationCancelled:
             raise
         except Exception as exc:
-            self.render_transcript_article(pid,segments,media,fallback_reason=str(exc),
+            detail=str(exc)
+            if isinstance(exc,ValueError) or "无效 JSON" in detail or "无效格式" in detail:
+                reason="模型返回内容格式异常"
+            else:
+                reason="图文总结未能生成可用章节内容"
+            self.render_transcript_article(pid,segments,media,fallback_reason=reason,
                                            include_html=include_html,progress_action=progress_action,
                                            summary_mode=summary_mode)
         self.deliver_artifact(pid,"markdown")
@@ -1794,9 +1799,8 @@ class Workbench:
         paragraphs=transcript_paragraphs(segments,layout=self.read(pid,"transcript_layout.json"))
         if not paragraphs: raise RuntimeError("没有可总结的字幕")
         batches=paragraph_batches(paragraphs); topic_chapters=[]
-        for batch_index,batch in enumerate(batches):
-            self.check_cancelled()
-            self.status(pid,"running",f"识别字幕主题 {batch_index+1}/{len(batches)}")
+
+        def summarize_batch(batch,split_depth=0):
             lines="\n".join(f"[{row['id']}] {row['start']:.2f}-{row['end']:.2f} 秒：{row['text']}" for row in batch)
             prompt=("你是严谨的中文内容编辑。请依据字幕段落本身，把连续段落按实际主题划分章节；"
                 "不要按固定分钟数切章，同一主题应合并，主题变化时才另起一章。每条段落必须且只能属于一个章节，"
@@ -1809,15 +1813,32 @@ class Workbench:
                 "\"title\":\"主题\",\"summary\":\"摘要\",\"bullets\":[\"要点\"],"
                 "\"visual_id\":\"p000002\",\"visual_description\":\"画面检索描述\"}]}\n"
                 +SUMMARY_MODES[summary_mode]+"\n字幕段落：\n"+lines)
-            result=self.model_chat_role("summary",[{"role":"user","content":prompt}],5000,
-                                 chat_template_kwargs={"enable_thinking":False})
-            data=parse_json_object(result)
-            try: grouped=chapters_from_ranges(data.get("chapters"),batch)
-            except ValueError as exc:
-                retry=self.model_chat_role("summary",[{"role":"user","content":prompt+
-                    f"\n上次返回的范围无效（{exc}）。请重新返回，必须从 {batch[0]['id']} 开始到 {batch[-1]['id']} 结束，连续覆盖且不得遗漏。"}],5000,
-                    chat_template_kwargs={"enable_thinking":False})
-                grouped=chapters_from_ranges(parse_json_object(retry).get("chapters"),batch)
+            last_error=None
+            for attempt in range(2):
+                request_prompt=prompt
+                if attempt:
+                    self.status(pid,"running",f"章节 JSON 格式异常，正在重试（{len(batch)} 段字幕）")
+                    request_prompt+=("\n上次响应无法解析或范围不完整。请重新返回一个完整、有效的 JSON 对象，不要使用 Markdown；"
+                        "字符串中的双引号必须转义，数组和对象末尾不要留逗号。请从头到尾完整覆盖以下段落，"
+                        "每章最多 3 条要点，每条要点不超过 40 字，摘要不超过 180 字，画面描述不超过 80 字。"
+                        f"段落范围必须从 {batch[0]['id']} 到 {batch[-1]['id']}。")
+                result=self.model_chat_role("summary",[{"role":"user","content":request_prompt}],5000,
+                                     chat_template_kwargs={"enable_thinking":False})
+                try:
+                    data=parse_json_object(result)
+                    return chapters_from_ranges(data.get("chapters"),batch)
+                except ValueError as exc:
+                    last_error=exc
+            if len(batch)>1 and split_depth<2:
+                midpoint=len(batch)//2
+                self.status(pid,"running",f"模型 JSON 连续无效，自动拆分字幕批次（{len(batch)} 段）")
+                return summarize_batch(batch[:midpoint],split_depth+1)+summarize_batch(batch[midpoint:],split_depth+1)
+            raise RuntimeError("章节总结模型多次返回无效格式") from last_error
+
+        for batch_index,batch in enumerate(batches):
+            self.check_cancelled()
+            self.status(pid,"running",f"识别字幕主题 {batch_index+1}/{len(batches)}")
+            grouped=summarize_batch(batch)
             topic_chapters.extend(grouped)
             self.progress(pid,progress_action,"running",round((batch_index+1)/len(batches)*30),
                           f"已整理 {batch_index+1}/{len(batches)} 组字幕主题")
@@ -2066,8 +2087,9 @@ class Workbench:
             f'<header class="hero"><div class="eyebrow">语音转写 · 无模型排版</div>'
             f'<h1>{escaped_title}</h1><div class="meta">来源：{escaped_source}　·　'
             f'{clock(duration)}　·　{len(paragraphs):,} 段　·　{character_count:,} 字</div></header>'
-            f'<aside class="note">本文按语音识别字幕整理，并附有原视频时间范围。未配置文本模型，'
-            f'因此不包含主题归纳、摘要或配图说明；识别文字未经模型校对。</aside>'
+            f'<aside class="note">本文按语音识别字幕整理，并附有原视频时间范围。'
+            f'{"模型未返回可用章节内容，因此未包含主题归纳、摘要或配图说明；" if fallback_reason else "未配置文本模型，因此未包含主题归纳、摘要或配图说明；"}'
+            f'识别文字未经模型校对。</aside>'
             f'<section class="article-body"><h2>转写正文</h2>{"".join(html_paragraphs)}</section>'
             f'<footer>由 Video Workbench 根据字幕自动排版 · 原始语音识别内容</footer>'
             f'</main></body></html>')
@@ -2078,8 +2100,8 @@ class Workbench:
             "fallback_reason":str(fallback_reason)[:500] if fallback_reason else "",
             "html_generated":bool(include_html)})
         if fallback_reason:
-            label=("模型服务不可用，已回退生成字幕版 Markdown 与 HTML" if include_html
-                   else "模型服务不可用，已回退生成字幕版总结 Markdown")
+            label=("已生成字幕版 Markdown 与 HTML（模型未返回可用章节内容）" if include_html
+                   else "已生成字幕版总结 Markdown（模型未返回可用章节内容）")
         else:
             label=("未配置文本模型，已生成字幕排版版 Markdown 与 HTML" if include_html
                    else "未配置文本模型，已生成字幕版总结 Markdown")
