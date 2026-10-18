@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-video-workbench"
-version = "0.2.7"
+version = "0.2.8"
 description = "Local video editing and illustrated notes orchestrator with user-configured external tools"
 readme = "README.md"
 requires-python = ">=3.11"

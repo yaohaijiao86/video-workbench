@@ -194,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, {"supported": self.auth_supported, "password_required": self.password_required})
             if parts == ["api", "settings"]:
                 return self.respond(200, self.wb.public_settings())
+            if parts == ["api", "task-control"]:
+                return self.respond(200, self.wb.task_control_status())
             if parts == ["api", "models"]:
                 return self.respond(200, services.models(self.wb.settings["base_url"], self.wb.api_key,
                                                           self.wb.settings.get("model_provider","local")))
@@ -314,6 +316,12 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "settings"]:
                 self.wb.save_settings(self.data())
                 return self.respond(200, {"ok": True})
+            if parts == ["api", "task-control"]:
+                value=self.data()
+                action=value.get("action") if isinstance(value,dict) else None
+                if action not in ("pause","resume"):
+                    raise RequestError(400,"任务控制操作无效")
+                return self.respond(200,self.wb.set_task_paused(action=="pause"))
             if parts == ["api", "bilibili", "qr"]:
                 self.data()
                 return self.respond(200,self.wb.start_bilibili_qr_login())

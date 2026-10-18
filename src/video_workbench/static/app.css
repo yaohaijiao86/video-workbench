@@ -321,6 +321,9 @@ button.secondary {
   color: #343942;
 }
 button.secondary:hover { border-color: #cbd0d9; background: #f8f9fb; box-shadow: none; }
+button.pause-task.task-paused { border-color: #e7c47a; background: #fff6df; color: #805b12; }
+button.pause-task.task-paused:hover { border-color: #d9ad50; background: #fff0c7; }
+button.pause-task.task-pause-pending { border-color: #dfc57f; }
 button:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; transform: none; }
 button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   outline: none;

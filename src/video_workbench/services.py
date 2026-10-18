@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, http.cookiejar, ipaddress, io, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import base64, http.cookiejar, ipaddress, io, json, os, queue, re, shutil, signal, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 from .core import parse_srt, write_srt
 
@@ -8,6 +8,118 @@ GATEWAY_MANAGE_PORT=9990
 
 class OperationCancelled(RuntimeError):
     """Raised when the user asks the current workbench operation to stop."""
+
+
+class TaskControl:
+    """Cancellation and cooperative pause controls shared with task subprocesses."""
+    def __init__(self, cancel_event, resume_event):
+        self.cancel_event=cancel_event
+        self.resume_event=resume_event
+        self.parked_event=threading.Event()
+
+    def is_set(self):
+        return self.cancel_event.is_set()
+
+    def wait_if_paused(self, process=None):
+        suspended=False
+        try:
+            while not self.resume_event.wait(.2):
+                if self.cancel_event.is_set():
+                    raise OperationCancelled("用户已停止任务")
+                if process is not None and process.poll() is None and not suspended:
+                    suspended=_suspend_process(process)
+                if process is None or process.poll() is not None or suspended:
+                    self.parked_event.set()
+                else:
+                    self.parked_event.clear()
+            if self.cancel_event.is_set():
+                raise OperationCancelled("用户已停止任务")
+        finally:
+            self.parked_event.clear()
+            if suspended and process is not None and process.poll() is None:
+                _resume_process(process)
+
+
+def _suspend_process(process):
+    try:
+        if os.name == "nt":
+            import ctypes
+            suspend=ctypes.WinDLL("ntdll").NtSuspendProcess
+            suspend.argtypes=[ctypes.c_void_p]
+            suspend.restype=ctypes.c_long
+            return suspend(process._handle)==0
+        process.send_signal(signal.SIGSTOP)
+        return True
+    except (AttributeError,OSError,ValueError):
+        return False
+
+
+def _resume_process(process):
+    try:
+        if os.name == "nt":
+            import ctypes
+            resume=ctypes.WinDLL("ntdll").NtResumeProcess
+            resume.argtypes=[ctypes.c_void_p]
+            resume.restype=ctypes.c_long
+            resume(process._handle)
+        else:
+            process.send_signal(signal.SIGCONT)
+    except (AttributeError,OSError,ValueError):
+        pass
+
+
+def _check_task_control(control, process=None):
+    if control is None:
+        return
+    wait_if_paused=getattr(control,"wait_if_paused",None)
+    if wait_if_paused:
+        wait_if_paused(process)
+    if control.is_set():
+        raise OperationCancelled("用户已停止任务")
+
+
+def _escape_invalid_json_backslashes(text):
+    """Escape stray backslashes inside JSON strings without altering valid escapes."""
+    result=[]
+    in_string=False
+    index=0
+    while index<len(text):
+        char=text[index]
+        if not in_string:
+            result.append(char)
+            if char=='"': in_string=True
+        elif char=='"':
+            result.append(char)
+            in_string=False
+        elif char=="\\":
+            following=text[index+1] if index+1<len(text) else ""
+            if following in ('"',"\\","/","b","f","n","r","t"):
+                result.extend((char,following))
+                index+=1
+            elif following=="u" and index+5<len(text) and all(
+                    value in "0123456789abcdefABCDEF" for value in text[index+2:index+6]):
+                result.append(text[index:index+6])
+                index+=5
+            else:
+                result.append("\\\\")
+        else:
+            result.append(char)
+        index+=1
+    return "".join(result)
+
+
+def _load_asr_json(path):
+    text=path.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        if exc.msg!="Invalid \\escape":
+            raise RuntimeError(f"ASR 输出 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+        repaired=_escape_invalid_json_backslashes(text)
+        try:
+            return json.loads(repaired,strict=False)
+        except json.JSONDecodeError as repaired_exc:
+            raise RuntimeError(f"ASR 输出 JSON 格式无效，修复反斜杠后仍无法读取（第 {repaired_exc.lineno} 行，第 {repaired_exc.colno} 列）") from exc
 
 def _terminate_process(process):
     if process.poll() is not None: return
@@ -116,14 +228,12 @@ def reveal_path(path):
     return target
 
 def run(argv,timeout=3600,cancel_event=None):
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,errors="replace",shell=False)
     deadline=time.monotonic()+timeout
     try:
         while True:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             remaining=deadline-time.monotonic()
             if remaining<=0:
                 _terminate_process(process)
@@ -350,7 +460,7 @@ def stop_local_model(base,key,mode="gateway",timeout=240):
 
 def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
     """Read FFmpeg's real output timestamp, not an estimated clock-based percent."""
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     command=argv[:1]+["-progress","pipe:1","-nostats"]+argv[1:]
     process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                              text=True,errors="replace",bufsize=1,shell=False)
@@ -365,9 +475,7 @@ def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
     try:
         stdout_done=False
         while not stdout_done:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             try: line=messages.get(timeout=.2)
             except queue.Empty:
                 if process.poll() is not None and not stdout_thread.is_alive(): break
@@ -381,9 +489,7 @@ def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
                 callback(min(99,max(0,round(seconds/max(duration,.001)*100))))
         deadline=time.monotonic()+21600
         while process.poll() is None:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             if time.monotonic()>=deadline:
                 _terminate_process(process)
                 raise subprocess.TimeoutExpired(command,21600)
@@ -437,7 +543,7 @@ def extract_audio(tool,source,target,cancel_event=None):
     temporary=target.with_name(f".{target.stem}.{uuid.uuid4().hex}.partial{target.suffix}")
     try:
         run([executable(tool),"-hide_banner","-loglevel","error","-y","-i",str(source),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(temporary)],14400,cancel_event)
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         temporary.replace(target)
     finally: temporary.unlink(missing_ok=True)
 
@@ -449,9 +555,10 @@ def run_asr(template,audio,target,cancel_event=None,substitutions=None):
         arg=str(value)
         for key,replacement in replacements.items(): arg=arg.replace("{"+key+"}",str(replacement))
         argv.append(arg)
-    argv[0]=executable(argv[0]); run(argv,14400,cancel_event)
+    target=Path(target)
+    argv[0]=executable(argv[0]); target.unlink(missing_ok=True); run(argv,14400,cancel_event)
     if not target.is_file(): raise RuntimeError("ASR 未生成 JSON 文件")
-    return json.loads(target.read_text(encoding="utf-8"))
+    return _load_asr_json(target)
 
 def external_json(template, substitutions, target, timeout=3600,cancel_event=None):
     if not isinstance(template,list) or not template: return None
@@ -495,7 +602,7 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
     if key: headers["Authorization"]="Bearer "+key
     req=urllib.request.Request(url,data=body,headers=headers,method="POST")
     for attempt in range(12):
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         try:
             with urllib.request.urlopen(req,timeout=240) as response: data=json.load(response)
             break
@@ -508,11 +615,11 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
             if retry_unavailable and (transient_gateway_error or transient_backend_error) and attempt<11:
                 delay=min(5+attempt*2,20); deadline=time.monotonic()+delay
                 while time.monotonic()<deadline:
-                    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+                    _check_task_control(cancel_event)
                     time.sleep(min(.2,deadline-time.monotonic()))
                 continue
             raise RuntimeError(f"模型服务 HTTP {exc.code}: "+detail) from exc
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     try:
         choice=data["choices"][0]
         content=choice["message"].get("content")
@@ -684,7 +791,7 @@ def export_video(tool,source,target,keeps,has_audio,progress=None,fps="source",b
     partial=target.with_name(f".{target.stem}.{uuid.uuid4().hex}.partial{target.suffix}")
     try:
         _export_one(tool,source,partial,keeps,has_audio,progress,fps,bitrate,encoder,resolution,cancel_event,subtitle_path)
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)

@@ -314,6 +314,9 @@ class Workbench:
         self.active_local_models={}
         self.busy=threading.Lock()
         self.cancel_event=threading.Event()
+        self.task_resume_event=threading.Event()
+        self.task_resume_event.set()
+        self.task_control=services.TaskControl(self.cancel_event,self.task_resume_event)
         self.active_pid=None
         self.active_operation=None
         self.active_batch_id=None
@@ -717,9 +720,23 @@ class Workbench:
         p=self.read(pid,"project.json"); p.update(status=status,step=step,error=error,updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         self.write(pid,"project.json",p)
     def check_cancelled(self):
+        self.task_control.wait_if_paused()
         if self.cancel_event.is_set(): raise services.OperationCancelled("用户已停止任务")
+    def task_control_status(self):
+        running=self.busy.locked()
+        paused=running and not self.task_resume_event.is_set()
+        parked=paused and self.task_control.parked_event.is_set()
+        return {"running":running,"paused":paused,"pause_pending":paused and not parked,
+                "operation":self.active_operation,"project_id":self.active_pid,"batch_id":self.active_batch_id}
+    def set_task_paused(self,paused):
+        if not isinstance(paused,bool): raise ValueError("暂停状态无效")
+        if not self.busy.locked(): raise RuntimeError("当前没有运行中的任务")
+        if paused: self.task_resume_event.clear()
+        else: self.task_resume_event.set()
+        return self.task_control_status()
     def begin_operation(self,pid,operation):
         self.cancel_event.clear()
+        self.task_resume_event.set()
         self.active_pid=pid
         self.active_operation=operation
         project=self.read(pid,"project.json")
@@ -736,6 +753,7 @@ class Workbench:
         self.active_pid=None
         self.active_operation=None
         self.cancel_event.clear()
+        self.task_resume_event.set()
     def cancel(self,pid):
         if not self.busy.locked() or self.active_pid!=pid:
             raise RuntimeError("这个项目当前没有可停止的任务")
@@ -899,7 +917,7 @@ class Workbench:
             self.remote_model_used=True
             kwargs.pop("chat_template_kwargs",None)
         result=services.chat(base,model,key,messages,max_tokens,provider=provider,
-                             cancel_event=self.cancel_event,**kwargs)
+                             cancel_event=self.task_control,**kwargs)
         self.check_cancelled()
         return result
 
@@ -1094,6 +1112,7 @@ class Workbench:
         if not self.busy.acquire(blocking=False): raise RuntimeError("另一任务正在运行，请稍后")
         try:
             self.cancel_event.clear()
+            self.task_resume_event.set()
             self.active_pid=None
             self.active_operation="batch"
             self.active_batch_id=bid
@@ -1200,6 +1219,7 @@ class Workbench:
                         self.end_operation(active_pid)
                     else:
                         self.cancel_event.clear()
+                        self.task_resume_event.set()
                         self.active_pid=None
                         self.active_operation=None
                     self.active_batch_id=None
@@ -1447,7 +1467,7 @@ class Workbench:
         folder=self.folder(pid); audio=folder/"audio.wav"
         self.status(pid,"running","提取音频")
         self.progress(pid,"transcribe","running",None,"正在提取音频")
-        if not audio.exists(): services.extract_audio(self.settings["ffmpeg"],self.source(pid),audio,self.cancel_event)
+        if not audio.exists(): services.extract_audio(self.settings["ffmpeg"],self.source(pid),audio,self.task_control)
         self.check_cancelled()
         self.status(pid,"running","运行外部 ASR")
         self.progress(pid,"transcribe","running",None,"语音识别中")
@@ -1455,7 +1475,7 @@ class Workbench:
             adapter=Path(getattr(sys,"_MEIPASS",Path(sys.executable).parent))/"asr_adapter"/"asr_qwen3.py"
         else:
             adapter=Path(__file__).with_name("asr_qwen3.py")
-        result=services.run_asr(self.settings["asr_command"],audio,folder/"asr.json",self.cancel_event,
+        result=services.run_asr(self.settings["asr_command"],audio,folder/"asr.json",self.task_control,
             {"asr_adapter":adapter,
              "asr_model":self.settings.get("qwen3_asr_model","").strip() or "Qwen/Qwen3-ASR-1.7B",
              "asr_aligner":self.settings.get("qwen3_aligner_model","").strip() or "Qwen/Qwen3-ForcedAligner-0.6B"})
@@ -1729,7 +1749,7 @@ class Workbench:
                               source_bitrate=media.get("video_bitrate"),
                               source_duration=media.get("duration"),
                               encoder=encoder,
-                              resolution=resolution,cancel_event=self.cancel_event,
+                              resolution=resolution,cancel_event=self.task_control,
                               subtitle_path=subtitle_path)
         self.check_cancelled()
         self.deliver_artifact(pid,"subtitle")
@@ -1793,7 +1813,7 @@ class Workbench:
             self.check_cancelled()
             self.status(pid,"running","外部场景检测")
             target=self.folder(pid)/"scenes.json"
-            data=services.external_json(cfg["scene_command"],{"video":str(self.source(pid)),"output":str(target)},target,14400,self.cancel_event)
+            data=services.external_json(cfg["scene_command"],{"video":str(self.source(pid)),"output":str(target)},target,14400,self.task_control)
             raw=data.get("times",[]) if isinstance(data,dict) else []
             scene_times=sorted(float(x) for x in raw if isinstance(x,(int,float)) and 0<=x<media["duration"])
         paragraphs=transcript_paragraphs(segments,layout=self.read(pid,"transcript_layout.json"))
@@ -1898,9 +1918,9 @@ class Workbench:
                     preview_path=None
                     if needs_vision:
                         preview_path=self.folder(pid)/f".frame_preview_{index:03d}_{candidate_index}.jpg"
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,preview_path,self.cancel_event)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,preview_path,self.task_control)
                     elif candidate_index==0:
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.cancel_event,max_width=None)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.task_control,max_width=None)
                     candidate_paths.append((picture,path,second,preview_path))
                 selected_index=0
                 if is_title_page:
@@ -1936,12 +1956,12 @@ class Workbench:
                 if selected_index>=0:
                     picture,path,second,preview_path=candidate_paths[selected_index]
                     if preview_path:
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.cancel_event,max_width=None)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.task_control,max_width=None)
                     pictures=[picture]
                     if cfg["ocr_command"]:
                         self.check_cancelled()
                         ocr_path=self.folder(pid)/f"ocr_topic_{index:03d}.json"
-                        data=services.external_json(cfg["ocr_command"],{"image":str(path),"output":str(ocr_path)},ocr_path,120,self.cancel_event)
+                        data=services.external_json(cfg["ocr_command"],{"image":str(path),"output":str(ocr_path)},ocr_path,120,self.task_control)
                         if isinstance(data,dict) and data.get("text"): ocr=str(data["text"])[:1200]
                 for candidate_index,(_,path,_,preview_path) in enumerate(candidate_paths):
                     if candidate_index!=selected_index: path.unlink(missing_ok=True)

@@ -4,6 +4,7 @@ let current = null;
 let currentBatch = "";
 let batches = [];
 let projects = [];
+let taskControl = {running:false,paused:false,pause_pending:false};
 let selectedOutputMode = "data";
 let renderedSuggestionsKey = "";
 let lastStatus = "";
@@ -345,6 +346,34 @@ async function loadBatches(prefer = null) {
   if (current) {
     const project = projects.find(row => row.id === current);
     if (project) updateOperationButtons(project);
+  }
+}
+function renderTaskControl(state = taskControl) {
+  taskControl=state;
+  const button=$("pause_task");
+  const settingsOpen=!$("settings_page").hidden;
+  button.hidden=!state.running || settingsOpen;
+  button.disabled=!state.running;
+  button.textContent=state.paused ? "继续任务" : "暂停任务";
+  button.setAttribute("aria-pressed",String(!!state.paused));
+  button.classList.toggle("task-paused",!!state.paused);
+  button.classList.toggle("task-pause-pending",!!state.pause_pending);
+  button.title=state.pause_pending ? "暂停请求已发送；当前模型请求或处理步骤完成后暂停" :
+    state.paused ? "继续当前任务" : state.running ? "暂停当前任务" : "没有运行中的任务";
+}
+async function loadTaskControl() {
+  renderTaskControl(await request("/api/task-control"));
+}
+async function toggleTaskPause() {
+  const pause=!taskControl.paused;
+  const button=$("pause_task");
+  button.disabled=true;
+  try {
+    renderTaskControl(await request("/api/task-control","POST",{action:pause ? "pause" : "resume"}));
+    notice(pause ? (taskControl.pause_pending ? "已请求暂停；当前模型请求或处理步骤完成后会停住。" : "任务已暂停，点击“继续任务”可恢复。") : "任务已继续。");
+  } catch (error) {
+    notice(error.message);
+    await loadTaskControl().catch(() => {});
   }
 }
 function renderSuggestions(rows, switched, defaultAll) {
@@ -896,6 +925,7 @@ function showSettings(open, options = {}) {
   $("workspace_page").hidden = open;
   $("settings_page").hidden = !open;
   $("open_settings").hidden = open;
+  renderTaskControl();
   if (options.scroll !== false) window.scrollTo({top:0,behavior:"smooth"});
   if (options.persist !== false) saveUIState();
 }
@@ -1036,6 +1066,7 @@ $("clear_bilibili_cookies").onclick = async () => {
   finally { button.disabled = false; }
 };
 $("open_settings").onclick = () => showSettings(true);
+$("pause_task").onclick = () => toggleTaskPause();
 $("logout").onclick = async () => {
   try { await request("/auth/logout", "POST", {}); }
   finally { window.location.replace("/"); }
@@ -1262,11 +1293,12 @@ $("segments").addEventListener("click", event => {
   saveTranscriptReview("已恢复整条删除建议");
 });
 const initialUIState = readUIState();
-Promise.all([loadSession(),loadAccess(),loadSettings(),loadProjects(),loadBatches(initialUIState?.batchId || "")])
+Promise.all([loadSession(),loadAccess(),loadSettings(),loadProjects(),loadBatches(initialUIState?.batchId || ""),loadTaskControl()])
   .then(() => restoreUIState(initialUIState))
   .catch(e => notice(e.message));
 setInterval(() => {
   if (current && !interactionBusy) openProject(current).catch(() => {});
   loadProjects().catch(() => {});
   loadBatches().catch(() => {});
+  loadTaskControl().catch(() => {});
 },4000);
