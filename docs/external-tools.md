@@ -1,78 +1,84 @@
 # 外部软件下载与配置
 
-本程序不打包下列外部软件、模型权重或服务。Windows 64 位程序可[直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.5/video-workbench-v0.2.5-windows-x64.exe)；也可在[所有版本页面](https://github.com/yaohaijiao86/video-workbench/releases)下载源码包。EXE 内含 Qwen3-ASR 适配脚本和通用命令模板，但不含 Qwen 推理依赖或模型权重；其他外部软件仍需按需配置。
+本程序不打包第三方软件、推理依赖或模型权重。可从 [Release 页面下载当前 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.6/video-workbench-v0.2.6-windows-x64.exe)，也可下载[源码与适配器](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.6/video-workbench-v0.2.6-source.zip)。EXE 内含 Qwen3-ASR 适配脚本；OCR、faster-whisper、PySceneDetect 等示例适配器放在源码包的 `examples` 目录。
 
-建议为不同模型准备独立 Python 环境。显存有限时不要同时加载多个大模型；模型效果、识别错误和切点质量应使用你自己的真实视频样本评估。
+## 推荐目录
 
-## 视频与媒体探测：FFmpeg / ffprobe（导出必需）
+先在磁盘上创建一个长期使用的根目录，例如 `D:\VideoWorkbench`。下面是建议布局；路径可按你的磁盘空间调整，重要的是使用固定位置并在设置中填完整路径。
 
-- 从 [FFmpeg 官方下载页](https://ffmpeg.org/download.html)选择适用于 Windows 的构建包，并在程序设置中填写 `ffmpeg.exe` 的完整路径。
-- 可运行 `ffmpeg -version` 验证安装。若找不到 `ffprobe`，程序会尝试用 FFmpeg 读取常见视频的时长和音轨信息；复杂封装建议同时配置同一构建包中的 `ffprobe.exe`。
-- CPU x264 编码需要逐帧处理。可在“精剪视频输出”中选择较快的 x264 预设；若所用 FFmpeg 构建包含 NVENC 且 NVIDIA 驱动可用，也可选择 NVIDIA GPU 编码。建议先用短片比较速度和画质。
+```text
+D:\VideoWorkbench\
+├─ tools\ffmpeg\bin\ffmpeg.exe
+├─ tools\ffmpeg\bin\ffprobe.exe
+├─ envs\qwen3-asr\Scripts\python.exe
+├─ envs\faster-whisper\Scripts\python.exe       # 可选
+├─ envs\paddleocr\Scripts\python.exe             # 可选
+├─ envs\pyscenedetect\Scripts\python.exe          # 可选
+├─ models\qwen3-asr\Qwen3-ASR-1.7B\
+├─ models\qwen3-asr\Qwen3-ForcedAligner-0.6B\
+├─ models\llm\                                  # LM Studio 等本地模型，可选
+├─ models\paddleocr\                             # OCR 模型缓存，可选
+├─ adapters\video-workbench\examples\           # 从源码包解压，可选
+└─ data\                                          # 项目和导出文件
+```
 
-## 语音识别与对齐：Qwen3-ASR（中文优先）
+单文件 EXE 运行时会在临时目录解包应用自身。不要把外部软件、Python 环境或模型放进临时解包目录；也不要放在仓库的 `.git`、`src` 或 `build` 目录。程序设置中的目录选择器或命令字段应指向上面稳定的路径。
 
-请参照 [Qwen3-ASR 官方仓库](https://github.com/QwenLM/Qwen3-ASR)准备受支持的 Python、推理依赖和模型文件。建议在独立环境安装：
+## 视频处理：FFmpeg / ffprobe（必需）
+
+1. 打开 [FFmpeg 官方下载页](https://ffmpeg.org/download.html)，进入 Windows 构建入口；官方页面提供 [gyan.dev Windows builds](https://www.gyan.dev/ffmpeg/builds/) 和 [BtbN Windows builds](https://github.com/BtbN/FFmpeg-Builds/releases)。下载 Windows x64 构建包并解压到 `D:\VideoWorkbench\tools\ffmpeg`。若压缩包内多一层版本目录，可将它重命名为 `ffmpeg`，最终确认 `bin` 目录中能看到 `ffmpeg.exe` 和 `ffprobe.exe`。
+2. 打开 Video Workbench「设置 → 外部程序」，填写：
+   - FFmpeg：`D:\VideoWorkbench\tools\ffmpeg\bin\ffmpeg.exe`
+   - ffprobe：`D:\VideoWorkbench\tools\ffmpeg\bin\ffprobe.exe`
+3. 在 PowerShell 运行 `& 'D:\VideoWorkbench\tools\ffmpeg\bin\ffmpeg.exe' -version`。设置完整路径后不必另行修改系统 PATH。
+
+CPU x264 编码会逐帧处理。若 FFmpeg 构建含 NVENC 且 NVIDIA 驱动可用，可在「精剪视频输出」选 NVIDIA GPU；先用短片比较速度和画质。
+
+## 中文语音识别：Qwen3-ASR（推荐）
+
+从 [Python 官方 Windows 下载页](https://www.python.org/downloads/windows/)安装 Python 3.12（Python 本体可保留安装器默认位置，不要手动搬动 `python.exe`），再参照 [Qwen3-ASR 官方仓库](https://github.com/QwenLM/Qwen3-ASR)建立单独环境。虚拟环境放在 `D:\VideoWorkbench\envs\qwen3-asr`；模型可自动下载，也可按官方说明使用 ModelScope 下载到你选择的固定目录。
 
 ```powershell
-python -m pip install -U qwen-asr
+py -3.12 -m venv D:\VideoWorkbench\envs\qwen3-asr
+& 'D:\VideoWorkbench\envs\qwen3-asr\Scripts\python.exe' -m pip install -U qwen-asr modelscope
+& 'D:\VideoWorkbench\envs\qwen3-asr\Scripts\modelscope.exe' download --model Qwen/Qwen3-ASR-1.7B --local_dir D:\VideoWorkbench\models\qwen3-asr\Qwen3-ASR-1.7B
+& 'D:\VideoWorkbench\envs\qwen3-asr\Scripts\modelscope.exe' download --model Qwen/Qwen3-ForcedAligner-0.6B --local_dir D:\VideoWorkbench\models\qwen3-asr\Qwen3-ForcedAligner-0.6B
 ```
 
-安装 `qwen-asr` 后，设置页已预置以下通用命令并随 EXE 附带适配脚本。若使用独立环境，将 `python` 替换成该环境的 Python 可执行文件完整路径；模型标识可使用默认官方 ID，也可填本地模型目录：
+在「设置 → 语音识别模型」中，把预置命令数组第一项 `python` 改为 `D:\VideoWorkbench\envs\qwen3-asr\Scripts\python.exe`。如果已手动下载权重，将两个模型文件夹分别填入 ASR 和 ForcedAligner 路径框；如果留空，程序会使用官方模型 ID 并让 qwen-asr 自行下载。适配器和权重都不需要复制到 EXE 旁边。4090D 等 GPU 若在另一台电脑，可按[双机 ASR 部署说明](remote-asr-windows.md)把环境和模型放在 GPU 服务器上。
 
-```json
-["python", "{asr_adapter}", "--input", "{audio}", "--output", "{output}", "--model", "{asr_model}", "--aligner", "{asr_aligner}"]
-```
+## 语音识别备选：faster-whisper / FunASR
 
-适配器支持传入模型标识或本地模型目录。优先中文、方言和字词级时间戳时，可先评估 1.7B 模型加对齐器；较小模型资源需求更低。长音频处理方式和安装限制请以官方文档为准。
+- [faster-whisper 官方仓库](https://github.com/SYSTRAN/faster-whisper)：在 `D:\VideoWorkbench\envs\faster-whisper` 建独立环境并安装 `faster-whisper`。示例适配器位于源码包 `examples\asr_faster_whisper.py`；可把源码包解压到 `D:\VideoWorkbench\adapters\video-workbench`，然后在 ASR 命令数组中用该环境的 `python.exe` 和该脚本的完整路径。模型首次加载时可由框架下载；也可用模型目录替换示例命令中的模型 ID。
+- [FunASR 官方安装说明](https://github.com/modelscope/FunASR)：单独放入 `D:\VideoWorkbench\envs\funasr` 环境。先通过 [PyTorch 官方选择器](https://pytorch.org/get-started/locally/)安装与设备匹配的 PyTorch/torchaudio，再安装 FunASR。模型缓存或手动下载目录建议放在 `D:\VideoWorkbench\models\funasr`；接入前需要一个输出本程序时间戳 JSON 格式的适配器。
 
-### 将 ASR 放在另一台局域网电脑
+不要把 Qwen、faster-whisper 和 FunASR 依赖全部装进同一个环境；深度学习依赖之间可能冲突。可用 10–20 分钟真实素材比较字错率和切点误差。
 
-可在有 GPU 的服务器上运行 `examples/asr_qwen3_server.py`，在工作电脑上调用 `examples/asr_remote_client.py`。具体占位符命令见[Windows 双机 ASR 部署说明](remote-asr-windows.md)。两端需要使用同一份强随机 token 文件；将 token 与模型目录放在仓库之外，只允许可信局域网或 VPN 访问服务端口，不要将该 HTTP 服务直接暴露到公网。
+## 剪辑建议与章节总结：本地模型或在线 API
 
-## ASR 备选：faster-whisper / FunASR
+- 本地桌面方案可从 [LM Studio 官方下载页](https://lmstudio.ai/download)安装 LM Studio。程序本身可安装在默认应用目录；模型在 LM Studio「My Models」中管理，建议将模型根目录改为 `D:\VideoWorkbench\models\llm`，不要手动把单个权重散放在程序安装目录。LM Studio 的模型目录结构和导入方式见[官方说明](https://lmstudio.ai/docs/app/advanced/import-model)。
+- 也可使用其他提供 OpenAI 兼容 Chat Completions 接口的本地/局域网推理服务；推理软件和模型权重放在实际运行推理的那台电脑，客户端只填写服务地址及模型 ID。
+- 在线服务不需要下载模型到本机；在「设置 → 模型服务配置」填写服务商 HTTPS API 地址、模型 ID 和 API Key。API Key 仅在本机设置中填写，不要写进公开 README、源码或命令示例。
 
-- [faster-whisper 官方仓库](https://github.com/SYSTRAN/faster-whisper)：独立环境安装后可使用 `examples/asr_faster_whisper.py`。多语种识别可评估 large-v3；更重视速度时可评估 turbo。请按官方说明选择与设备匹配的运行依赖。
-- [FunASR 官方仓库](https://github.com/modelscope/FunASR)：可评估 SenseVoice 或 Paraformer。要接入本程序，适配命令需输出带时间戳的 JSON；字段格式可参考仓库中的 ASR 示例。
-
-建议用 10–20 分钟真实素材比较字错率和切点误差。口音、噪声和录音条件不同，模型表现也会变化。
-
-## 语义判断与总结：本地或在线模型
-
-剪辑建议、章节总结等 AI 功能需要可调用的模型服务。可配置本地/局域网模型，或配置服务商提供的 HTTPS OpenAI 兼容 API 地址和 API Key；扫描模型后，在“模型配置优先级”中选择要启用的模型，再将可调用模型加入任务列表。API Key 仅填写在本机程序设置中，不要写进 README、命令示例或仓库文件。
-
-字幕文本会发送给所选模型服务；启用画面识别时，抽取的视频截图也会发送给视觉模型服务。请根据自己的隐私要求选择服务商，并人工核对数字、否定、专有名词和重复句。删除建议默认以删除线显示，应在字幕框复核后再导出。
-
-运行本地或局域网任务前，确认模型所在机器和推理服务在线，并确认模型已加载或服务支持按需加载。自建网关模式会在任务结束时通过管理接口停止推理引擎；如果同机有其他应用共用该引擎，这可能影响它们。其他推理服务请选择手动管理，并在服务端按需卸载模型或停止引擎以释放内存和显存。请只使用中文理解和 JSON 输出表现稳定的模型。
+程序通过所选服务接收字幕文本；启用视觉分析时还会发送抽取的截图。请按自己的隐私要求选择服务商并人工复核输出。
 
 ## 视觉理解：Qwen3-VL（可选）
 
-参照 [Qwen3-VL 官方仓库](https://github.com/QwenLM/Qwen3-VL)部署视觉推理服务。选择适合显存的模型版本，并确认服务提供兼容图片输入的 Chat Completions 接口；在程序中填写视觉模型 ID 后，先用一张图片验证请求。较大的模型可能更稳定，但通常也更慢、占用更多资源。本程序逐章抽取画面辅助分析，单帧不能代表整个视频片段。
+从 [Qwen3-VL 官方仓库](https://github.com/QwenLM/Qwen3-VL)选择适合显存的模型和部署方式；例如可查看 [Qwen 官方 Hugging Face 模型页](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)。推理服务若运行在另一台 GPU 服务器，仓库和推理环境都放在服务器上；模型权重建议放在服务器的 `D:\VideoWorkbench\models\qwen3-vl`（Linux 服务器可改为 `/data/models/qwen3-vl`）。客户端 EXE 不需要保存这些权重，只需配置服务器提供的兼容图片输入的 Chat Completions 地址和视觉模型 ID。先用一张图片验证接口，再开启逐章抽帧分析。
 
-## 画面文字识别：PaddleOCR（可选）
+## 画面文字：PaddleOCR（可选）
 
-参照 [PaddleOCR 官方仓库](https://github.com/PaddlePaddle/PaddleOCR)安装与当前平台匹配的 PaddlePaddle 和 `paddleocr`。OCR 命令调用示例：
+按 [PaddleOCR 官方安装文档](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/installation.md)和 [PaddlePaddle 官方安装选择器](https://www.paddlepaddle.org.cn/install/quick)为系统、Python 和 CPU/GPU 选匹配版本。建议单独建立 `D:\VideoWorkbench\envs\paddleocr`，OCR 模型缓存放在 `D:\VideoWorkbench\models\paddleocr`。示例适配器 `examples\ocr_paddle.py` 在源码包中；该脚本支持 `--cache-dir D:\VideoWorkbench\models\paddleocr`。在「设置 → 外部程序」中配置该环境的 `python.exe`、适配器脚本完整路径和图片/JSON 参数。
 
-```powershell
-python examples/ocr_paddle.py --image {image} --output {output}
-```
-
-完整 JSON 输出示例见仓库中的适配器说明。幻灯片或屏幕录制适合开启 OCR；纯口播通常收益较低。识别小字时，专用 OCR 可能比通用视觉模型更合适。
+幻灯片、屏幕录制适合开启 OCR；纯口播收益低。先用单张图片确认 JSON 输出正常。
 
 ## 镜头检测：PySceneDetect / TransNetV2（可选）
 
-- [PySceneDetect 官方仓库](https://github.com/Breakthrough/PySceneDetect)：在独立环境安装 `scenedetect`，并配置 FFmpeg。适配器调用示例：
+- [PySceneDetect 官方下载页](https://www.scenedetect.com/download/)提供 Windows 安装包及 Python 安装方式。若希望独立管理，建立 `D:\VideoWorkbench\envs\pyscenedetect`，安装 `scenedetect`；它依赖 FFmpeg 做视频拆分。把源码包的 `examples\scene_pyscenedetect.py` 放在适配器目录，命令数组使用该环境 `python.exe`、脚本完整路径，以及 `--video {video} --output {output}` 参数。
+- [TransNetV2 官方仓库](https://github.com/soCzech/TransNetV2)的代码可放在 `D:\VideoWorkbench\tools\TransNetV2`，权重放在 `D:\VideoWorkbench\models\TransNetV2`。它需自行配置 Python 依赖和适配命令，并输出 `{"times":[12.5,25.0]}` 形式的场景时间点 JSON。
 
-  ```powershell
-  python examples/scene_pyscenedetect.py --video {video} --output {output}
-  ```
+运动镜头可先尝试 PySceneDetect AdaptiveDetector，再用真实素材核对漏检和误检；固定机位口播可以跳过。场景切点只用于选择截图，不自动决定删除内容。
 
-- [TransNetV2 官方仓库](https://github.com/soCzech/TransNetV2)可作为神经网络方案；接入时需适配场景时间点 JSON 协议，例如 `{"times":[12.5,25.0]}`。
+## 项目、模型和运行数据
 
-运动镜头可先尝试 PySceneDetect 的 AdaptiveDetector，再用真实素材核对漏检和误检。固定机位口播可以跳过镜头检测。场景切点用于挑选截图，不会自动决定删除内容。
-
-## 通用部署建议
-
-- 先以短视频验证依赖、模型路径、输出 JSON 和视频导出，再处理长素材或批次。
-- 为 API Key、token、模型文件和运行数据使用仓库之外的位置；公开仓库只提交不含个人或机器配置的示例。
-- 不要把服务密钥、私有服务器地址、用户目录或本机配置贴入公开 issue 或提交记录。
+建议将项目输出路径设置为 `D:\VideoWorkbench\data`，模型、Python 环境、API 密钥文件及双机 ASR token 则分别放在独立目录，不要放进 Git 仓库或源码包。局域网服务器只从可信网络访问，不要直接暴露到公网。首次先处理短视频，确认依赖、模型路径、适配器 JSON 和导出正常，再处理长素材或批次。
