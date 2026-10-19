@@ -1116,7 +1116,7 @@ class Workbench:
             self.active_pid=None
             self.active_operation="batch"
             self.active_batch_id=bid
-            batch.update(status="running",mode=mode,step="开始批量处理",completed=0,failed=0,skipped=len(all_projects)-len(targets))
+            batch.update(status="running",mode=mode,step="开始批量处理 · 按顺序逐个视频制作",completed=0,failed=0,skipped=len(all_projects)-len(targets))
             self._save_json(self.batches_path,self.batches)
         except Exception:
             self.active_pid=None

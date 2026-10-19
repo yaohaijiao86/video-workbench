@@ -78,48 +78,21 @@ def _check_task_control(control, process=None):
         raise OperationCancelled("用户已停止任务")
 
 
-def _escape_invalid_json_backslashes(text):
-    """Escape stray backslashes inside JSON strings without altering valid escapes."""
-    result=[]
-    in_string=False
-    index=0
-    while index<len(text):
-        char=text[index]
-        if not in_string:
-            result.append(char)
-            if char=='"': in_string=True
-        elif char=='"':
-            result.append(char)
-            in_string=False
-        elif char=="\\":
-            following=text[index+1] if index+1<len(text) else ""
-            if following in ('"',"\\","/","b","f","n","r","t"):
-                result.extend((char,following))
-                index+=1
-            elif following=="u" and index+5<len(text) and all(
-                    value in "0123456789abcdefABCDEF" for value in text[index+2:index+6]):
-                result.append(text[index:index+6])
-                index+=5
-            else:
-                result.append("\\\\")
-        else:
-            result.append(char)
-        index+=1
-    return "".join(result)
-
-
 def _load_asr_json(path):
     text=path.read_text(encoding="utf-8-sig")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        if exc.msg!="Invalid \\escape":
-            raise RuntimeError(f"ASR 输出 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
-        repaired=_escape_invalid_json_backslashes(text)
+    repaired=text
+    repairs=0
+    while True:
         try:
             return json.loads(repaired,strict=False)
-        except json.JSONDecodeError as repaired_exc:
-            raise RuntimeError(f"ASR 输出 JSON 格式无效，修复反斜杠后仍无法读取（第 {repaired_exc.lineno} 行，第 {repaired_exc.colno} 列）") from exc
+        except json.JSONDecodeError as exc:
+            if exc.msg not in ("Invalid \\escape", "Invalid \\uXXXX escape"):
+                raise RuntimeError(f"ASR 输出 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+            if exc.pos>=len(repaired) or repaired[exc.pos]!="\\" or repairs>=10000:
+                raise RuntimeError(f"ASR 输出 JSON 含无法修复的反斜杠（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+            # Preserve literal Windows paths and transcript text such as "C:\\Users\\...".
+            repaired=repaired[:exc.pos]+"\\"+repaired[exc.pos:]
+            repairs+=1
 
 def _terminate_process(process):
     if process.poll() is not None: return
@@ -556,7 +529,22 @@ def run_asr(template,audio,target,cancel_event=None,substitutions=None):
         for key,replacement in replacements.items(): arg=arg.replace("{"+key+"}",str(replacement))
         argv.append(arg)
     target=Path(target)
-    argv[0]=executable(argv[0]); target.unlink(missing_ok=True); run(argv,14400,cancel_event)
+    argv[0]=executable(argv[0])
+    target.unlink(missing_ok=True)
+    try:
+        run(argv,14400,cancel_event)
+    except OperationCancelled:
+        raise
+    except RuntimeError as exc:
+        # Some wrappers write a usable result before returning a nonzero status.
+        if target.is_file():
+            try:
+                return _load_asr_json(target)
+            except RuntimeError:
+                pass
+        if "Invalid \\escape" in str(exc):
+            raise RuntimeError("ASR 外部命令内部解析 JSON 失败，且没有生成可用结果；请检查 ASR 脚本或模型配置文件。") from exc
+        raise
     if not target.is_file(): raise RuntimeError("ASR 未生成 JSON 文件")
     return _load_asr_json(target)
 
