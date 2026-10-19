@@ -94,6 +94,13 @@ def _load_asr_json(path):
             repaired=repaired[:exc.pos]+"\\"+repaired[exc.pos:]
             repairs+=1
 
+def _load_external_json(text,label):
+    """Parse JSON produced by external tools and APIs, preserving literal paths."""
+    try:
+        return _loads_json_repairing_escapes(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} 返回的 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+
 def _terminate_process(process):
     if process.poll() is not None: return
     process.terminate()
@@ -414,7 +421,7 @@ def stop_local_model(base,key,mode="gateway",timeout=240):
     request=urllib.request.Request(url,data=b"",headers={"Accept":"application/json"},method="POST")
     try:
         with urllib.request.urlopen(request,timeout=timeout) as response:
-            result=json.load(response)
+            result=_load_external_json(response.read().decode("utf-8-sig"),"网关停止接口")
     except urllib.error.HTTPError as exc:
         detail=exc.read(1200).decode("utf-8","replace")
         raise RuntimeError(f"网关停止推理引擎 HTTP {exc.code}: {detail}") from exc
@@ -478,7 +485,7 @@ def probe(tool,source,ffmpeg="ffmpeg"):
     try: probe_exe=executable(tool)
     except RuntimeError: probe_exe=None
     if probe_exe:
-        data=json.loads(run([probe_exe,"-v","error","-show_format","-show_streams","-of","json",str(source)],60))
+        data=_load_external_json(run([probe_exe,"-v","error","-show_format","-show_streams","-of","json",str(source)],60),"ffprobe")
         duration=float(data.get("format",{}).get("duration",0)); streams=data.get("streams",[])
         if duration<=0 or not any(s.get("codec_type")=="video" for s in streams): raise RuntimeError("无法读取有效视频")
         video=next(s for s in streams if s.get("codec_type")=="video")
@@ -553,7 +560,7 @@ def external_json(template, substitutions, target, timeout=3600,cancel_event=Non
     argv=[str(x).format(**substitutions) for x in template]
     argv[0]=executable(argv[0]); run(argv,timeout,cancel_event)
     if not target.is_file(): raise RuntimeError("外部工具未生成 JSON 文件")
-    return json.loads(target.read_text(encoding="utf-8"))
+    return _load_external_json(target.read_text(encoding="utf-8-sig"),"外部工具")
 
 def model_url(base,provider="local"):
     from urllib.parse import urlparse
@@ -605,7 +612,7 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
             break
         except urllib.error.HTTPError as exc:
             detail=exc.read(600).decode("utf-8","replace")
-            try: error_type=json.loads(detail).get("error",{}).get("type")
+            try: error_type=_loads_json_repairing_escapes(detail).get("error",{}).get("type")
             except (ValueError,AttributeError): error_type=None
             transient_gateway_error=(exc.code==503 and error_type in ("not_ready","host_offline","switch_stopping"))
             transient_backend_error=(exc.code==502 and error_type=="backend_unreachable")
@@ -630,7 +637,8 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
 def models(base,key,provider="local"):
     req=urllib.request.Request(model_url(base,provider)+"/models")
     if key: req.add_header("Authorization","Bearer "+key)
-    with urllib.request.urlopen(req,timeout=12) as response: value=json.load(response)
+    with urllib.request.urlopen(req,timeout=12) as response:
+        value=_load_external_json(response.read().decode("utf-8-sig"),"模型列表接口")
     return [{"id":m.get("id"),"active":m.get("active")} for m in value.get("data",[]) if m.get("id")]
 
 def frame(tool,source,second,target,cancel_event=None,max_width=960):
