@@ -1,8 +1,8 @@
 # Video Workbench
 
-简体中文说明：[README.md](README.md)。Windows downloads: [executable](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.7/video-workbench-v0.2.7-windows-x64.exe) · [source archive](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.7/video-workbench-v0.2.7-source.zip).
+简体中文说明：[README.md](README.md)。Windows downloads: [executable](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.11/video-workbench-v0.2.11-windows-x64.exe) · [source archive](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.11/video-workbench-v0.2.11-source.zip).
 
-Video Workbench is a local-first tool for reviewing video transcripts, preparing precise edits, and producing illustrated notes. Version 0.2.7 is a preview release.
+Video Workbench is a local-first tool for reviewing video transcripts, preparing precise edits, and producing illustrated notes. Version 0.2.11 is a preview release.
 
 ## Project goals
 

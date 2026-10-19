@@ -1,6 +1,6 @@
 # 外部软件下载与配置
 
-本程序不打包第三方软件、推理依赖或模型权重。可从 [Release 页面下载当前 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.10/video-workbench-v0.2.10-windows-x64.exe)，也可下载[源码与适配器](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.10/video-workbench-v0.2.10-source.zip)。EXE 内含 Qwen3-ASR 适配脚本；OCR、faster-whisper、PySceneDetect 等示例适配器放在源码包的 `examples` 目录。
+本程序不打包第三方软件、推理依赖或模型权重。可从 [Release 页面下载当前 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.11/video-workbench-v0.2.11-windows-x64.exe)，也可下载[源码与适配器](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.11/video-workbench-v0.2.11-source.zip)。EXE 内含 Qwen3-ASR 适配脚本；OCR、faster-whisper、PySceneDetect 等示例适配器放在源码包的 `examples` 目录。
 
 ## 推荐目录
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import base64, http.cookiejar, ipaddress, io, json, os, queue, re, shutil, signal, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
-from .core import parse_srt, write_srt
+from .core import _loads_json_repairing_escapes, parse_srt, write_srt
 
 GATEWAY_API_PORT=8787
 GATEWAY_MANAGE_PORT=9990
@@ -589,10 +589,19 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
     headers={"Content-Type":"application/json"}
     if key: headers["Authorization"]="Bearer "+key
     req=urllib.request.Request(url,data=body,headers=headers,method="POST")
+    invalid_response_retries=0
     for attempt in range(12):
         _check_task_control(cancel_event)
         try:
-            with urllib.request.urlopen(req,timeout=240) as response: data=json.load(response)
+            with urllib.request.urlopen(req,timeout=240) as response:
+                raw=response.read().decode("utf-8-sig")
+            try:
+                data=_loads_json_repairing_escapes(raw)
+            except json.JSONDecodeError as exc:
+                if invalid_response_retries<1:
+                    invalid_response_retries+=1
+                    continue
+                raise RuntimeError("模型服务连续返回无法解析的 Chat Completions 响应；请检查服务端响应格式后重试") from exc
             break
         except urllib.error.HTTPError as exc:
             detail=exc.read(600).decode("utf-8","replace")
