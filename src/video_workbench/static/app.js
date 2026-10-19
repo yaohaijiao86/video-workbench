@@ -394,27 +394,62 @@ function formatDurationClock(value) {
   const h = Math.floor(totalSeconds / 3600), m = Math.floor(totalSeconds % 3600 / 60), s = totalSeconds % 60;
   return [h,m,s].map(x => String(x).padStart(2,"0")).join(":");
 }
+function formatSummaryDuration(value) {
+  const seconds=Number(value);
+  return formatDurationClock(Math.max(0,Number.isFinite(seconds) ? seconds : 0));
+}
+function mergeTimeRanges(ranges) {
+  const merged=[];
+  for (const [start,end] of ranges.sort((a,b) => a[0]-b[0] || a[1]-b[1])) {
+    const previous=merged[merged.length-1];
+    if (previous && start<=previous[1]+.001) previous[1]=Math.max(previous[1],end);
+    else merged.push([start,end]);
+  }
+  return merged;
+}
+function cutCategory(value) {
+  const category=String(value || "other").toLowerCase();
+  if (category.includes("pause") || category.includes("停顿")) return "pause";
+  if (["repeat","repetition","duplicate","重复"].some(word => category.includes(word))) return "repeat";
+  if (["filler","discourse","语气","口头禅"].some(word => category.includes(word))) return "filler";
+  if (["restart","rephrase","false_start","重新起句"].some(word => category.includes(word))) return "restart";
+  if (category.includes("manual") || category.includes("手动")) return "manual";
+  return "other";
+}
+function renderCutSummary(duration, selectedRanges, estimatedDuration) {
+  const categories=[
+    ["pause","停顿裁剪"],["repeat","重复裁剪"],["filler","语气词裁剪"],
+    ["restart","重新起句裁剪"],["manual","手动标记裁剪"],["other","其他建议裁剪"]
+  ];
+  const byCategory=new Map(categories.map(([key]) => [key,[]]));
+  for (const row of selectedRanges) byCategory.get(cutCategory(row.category)).push([row.start,row.end]);
+  const finalDuration=Math.max(0,Math.min(duration,estimatedDuration));
+  const totalRemoved=Math.max(0,duration-finalDuration);
+  const metrics=[
+    {label:"原视频长度",value:formatSummaryDuration(duration)},
+    ...categories.map(([key,label]) => ({
+      label,value:formatSummaryDuration(mergeTimeRanges(byCategory.get(key)).reduce((sum,[start,end]) => sum+end-start,0))
+    })),
+    {label:"共裁剪时长",value:formatSummaryDuration(totalRemoved),className:"cut-summary-total"},
+    {label:"预计成片长度",value:formatSummaryDuration(finalDuration),className:"cut-summary-final"}
+  ];
+  $("cut_summary_metrics").innerHTML=metrics.map(metric =>
+    '<div class="cut-summary-stat ' + (metric.className || '') + '"><span>' + metric.label + '</span><strong>' + metric.value + '</strong></div>'
+  ).join("");
+}
 function updateClipEstimate() {
   const label=$("clip_estimate");
   if (!label) return;
   const duration=Number(currentMediaDuration);
   if (!(duration>0)) {
     label.textContent="导入视频后显示原片时长";
+    $("cut_summary_metrics").innerHTML='<div class="cut-summary-stat"><span>导入视频后显示时长统计</span><strong>—</strong></div>';
     return;
   }
-  if (!currentAnalysisDone) {
-    label.textContent="原片 " + formatDurationClock(duration);
-    return;
-  }
-  const ranges=currentSuggestions.filter(row => row.selected).map(row => [
-    Math.max(0,Number(row.start)),Math.min(duration,Number(row.end))
-  ]).filter(([start,end]) => Number.isFinite(start) && Number.isFinite(end) && end>start).sort((a,b) => a[0]-b[0]);
-  const merged=[];
-  for (const [start,end] of ranges) {
-    const previous=merged[merged.length-1];
-    if (previous && start<=previous[1]+.001) previous[1]=Math.max(previous[1],end);
-    else merged.push([start,end]);
-  }
+  const selectedRanges=currentSuggestions.filter(row => row.selected).map(row => ({
+    start:Math.max(0,Number(row.start)),end:Math.min(duration,Number(row.end)),category:row.category
+  })).filter(row => Number.isFinite(row.start) && Number.isFinite(row.end) && row.end>row.start);
+  const merged=mergeTimeRanges(selectedRanges.map(row => [row.start,row.end]));
   let cursor=0,kept=0;
   for (const [start,end] of merged) {
     if (start>cursor+.02) kept+=start-cursor;
@@ -422,6 +457,11 @@ function updateClipEstimate() {
   }
   if (duration>cursor+.02) kept+=duration-cursor;
   const estimatedDuration=Math.min(duration,Math.max(0,kept));
+  renderCutSummary(duration,selectedRanges,estimatedDuration);
+  if (!currentAnalysisDone) {
+    label.textContent="原片 " + formatDurationClock(duration);
+    return;
+  }
   label.textContent="原片 " + formatDurationClock(duration) + " 新片 " + formatDurationClock(estimatedDuration);
 }
 function transcriptCharacters(value) {
