@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Workbench</title><link rel="stylesheet" href="/app.css?v=import-card-polish-20261018-1"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Workbench</title><link rel="stylesheet" href="/app.css?v=bilibili-batch-links-20261022-1"></head>
 <body>
-<header><div class="wrap top"><div class="brand"><b><i class="brand-mark" aria-hidden="true">▶</i>Video Workbench</b><span>视频工作台 · 0.2.4</span></div><div class="header-actions"><button id="logout" class="secondary" type="button" hidden>退出登录</button><button id="open_settings" class="secondary" type="button">⚙ 设置</button></div></div></header>
+<header><div class="wrap top"><div class="brand"><b><i class="brand-mark" aria-hidden="true">▶</i>Video Workbench</b><span>视频工作台 · 0.2.4</span><div id="bilibili_download_indicator" class="bilibili-download-indicator" hidden role="status" aria-live="polite"><span id="bilibili_download_label">正在准备 B 站视频下载…</span><progress id="bilibili_download_bar" max="100" aria-label="B 站视频下载进度"></progress><span id="bilibili_download_details"></span></div></div><div class="header-actions"><button id="logout" class="secondary" type="button" hidden>退出登录</button><button id="pause_task" class="secondary pause-task" type="button" disabled hidden aria-pressed="false" title="没有运行中的任务">暂停任务</button><button id="open_settings" class="secondary" type="button">⚙ 设置</button></div></div></header>
 <main class="wrap"><div id="message" role="status" aria-live="polite"></div>
 <div id="workspace_page">
   <section class="hero"><div class="eyebrow">本地处理 · 工具由你选择</div><h1>让长视频，变成清晰的内容。</h1><p>批量导入、逐条审核剪辑点、输出视频字幕与图文笔记。</p></section>
@@ -9,16 +9,16 @@
   <section class="layout">
     <section class="pane import-card">
       <button class="import-summary" id="import_panel" type="button" aria-expanded="true" aria-controls="import_content"><span>导入视频</span><small>添加单个视频、多个视频或整个文件夹</small></button>
-      <div class="import-actions"><button id="generate_document" class="secondary" type="button" disabled title="按字幕生成无时间戳 Markdown；若尚无标点排版，会先尝试自动整理">生成文档</button><button id="generate_timestamp_document" class="secondary" type="button" disabled title="生成带段落时间范围的 Markdown 文档">时间戳文档</button><button id="finish_all" type="button" disabled>一键完成</button><button id="open_finished_folder" class="secondary" type="button" disabled title="在资源管理器中打开当前项目文件夹">打开文件夹</button></div>
+      <div class="import-actions"><button id="generate_document" class="secondary" type="button" disabled title="完成转写、剪辑分析和图文文档生成，不导出视频">生成文档</button><button id="generate_timestamp_document" class="secondary" type="button" disabled title="根据已有字幕直接生成带时间戳的完整文稿；没有字幕时请先转写或导入 SRT/VTT">时间戳文档</button><button id="finish_all" type="button" disabled>一键完成</button><button id="open_finished_folder" class="secondary" type="button" disabled title="在资源管理器中打开当前项目文件夹">打开文件夹</button></div>
       <div id="import_content" class="import-content">
       <div id="drop" class="drop" tabindex="0" role="button" aria-label="选择视频文件或拖入文件夹"><span class="drop-icon" aria-hidden="true">↑</span><b>拖入视频文件或文件夹</b><small>支持 MP4、MOV、MKV、WEBM · 导入后点击右侧按钮开始处理 · 点击可多选</small></div>
       <input id="video" type="file" accept=".mp4,.mov,.mkv,.webm" multiple hidden>
       <div class="divider"></div>
-      <h3>从服务器文件夹或 B 站链接导入</h3><div class="field-inline folder-row"><input id="workspace_folder" placeholder="服务器文件夹绝对路径，或粘贴 B 站视频链接" aria-label="服务器工作区文件夹或 B 站视频链接"><button id="pick_workspace" class="secondary" type="button">选择文件夹</button><button id="import_folder" type="button">导入文件夹或链接</button></div>
+      <h3>从服务器文件夹或 B 站链接导入</h3><div class="field-inline folder-row"><input id="workspace_folder" placeholder="服务器文件夹绝对路径，或粘贴 B 站视频链接" aria-label="服务器工作区文件夹或 B 站视频链接"><button id="add_bilibili_link" class="secondary" type="button">＋ 增加链接</button><button id="pick_workspace" class="secondary" type="button">选择文件夹</button><button id="import_folder" type="button">导入文件夹或链接</button></div><div id="bilibili_link_list" class="bilibili-link-list" aria-live="polite"></div>
       <p class="hint">导入只创建项目和批次，不会自动处理；匹配到字幕时会自动导入，开始任务后会跳过语音转写。</p>
       </div>
     </section>
-    <section class="pane batch-card"><div class="batch-head"><button id="batch_toggle" class="batch-toggle" type="button" aria-expanded="false" aria-controls="batch_content"><span>批量处理</span><i class="batch-chevron" aria-hidden="true"></i></button><select id="batch_select" aria-label="当前操作批次"><option value="">暂无批次</option></select></div><div id="batch_content" class="batch-content" hidden>
+    <section class="pane batch-card"><div class="batch-head"><button id="batch_toggle" class="batch-toggle" type="button" aria-expanded="false" aria-controls="batch_content"><span>批量处理</span><i class="batch-chevron" aria-hidden="true"></i></button><div id="batch_run_progress" class="batch-run-progress" hidden><div class="batch-run-top"><strong id="batch_run_count">第 0 / 0 个任务</strong><span id="batch_run_percent">0%</span></div><div id="batch_run_meter" class="batch-run-meter" role="progressbar" aria-label="批量处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="batch_run_fill" class="batch-run-fill"></span></div><div class="batch-run-bottom"><small id="batch_run_state">已处理 0 / 0</small><small id="batch_run_failures">失败 0</small></div></div><select id="batch_select" aria-label="当前操作批次"><option value="">暂无批次</option></select></div><div id="batch_content" class="batch-content" hidden><p class="hint">按列表顺序逐个视频制作；当前视频完成或失败后，再开始下一个。</p>
       <div id="batch_tasks" class="batch-tasks" aria-live="polite"></div>
     </div></section>
   </section>
@@ -33,6 +33,7 @@
     <div class="field"><label for="subtitle">或导入已有 SRT / VTT 字幕</label><input id="subtitle" type="file" accept=".srt,.vtt"></div><div id="downloads"></div>
     <div class="transcript-head"><div><h3>字幕与剪辑</h3><p class="hint">横线表示将删除，默认全选；浅红点线表示剪辑建议当前未选中，单击可采纳；单击任意横线可恢复整条建议。拖选未标记文字并松开可标记删除；拖选已划线部分并松开，只恢复选中的文字。长停顿自动换段，停顿标记已缩小显示；点击标记可切换删除。已配置文本模型时，转写完成会自动补充标点并按语意分段。</p><div class="transcript-format"><button id="punctuate" class="secondary" type="button">补标点与分段</button><progress id="progress_punctuate" max="100" value="0"></progress><small id="label_punctuate">转写完成后自动整理标点与段落</small></div></div><div class="transcript-tools"><a id="transcript_download">下载纯文本</a></div></div>
     <div id="segments" class="transcript-text" tabindex="0" aria-label="完整字幕；单击删除线恢复整条建议，拖选已划线内容局部恢复，拖选未划线内容标记删除"></div><h3>章节概览</h3><div id="chapters"></div>
+    <section class="cut-summary" aria-labelledby="cut_summary_title"><div class="cut-summary-head"><h3 id="cut_summary_title">本次剪辑时长统计</h3><p>按当前勾选项实时更新。分类时长分别合并同类区间；跨类型重叠可能重复计入分类，共裁剪时长会去重。</p></div><div id="cut_summary_metrics" class="cut-summary-grid" aria-live="polite"></div></section>
   </section>
 </div>
 <section id="settings_page" class="pane settings-page" hidden>
@@ -42,7 +43,7 @@
   <details class="settings-module module-storage" open><summary><span>项目保存位置</span><small>视频和笔记输出目录</small><div class="module-actions"><button type="button" data-module-save="storage">保存</button><button class="secondary" type="button" data-module-undo="storage">撤回</button></div></summary><div class="settings-module-body"><div class="field"><label for="output_mode">保存方式</label><select id="output_mode"><option value="data">工作台数据目录（默认）</option><option value="source">原视频所在文件夹</option><option value="custom">指定文件夹</option></select></div>
   <div class="field"><label for="output_dir">指定保存文件夹</label><div class="field-inline"><input id="output_dir" placeholder="选择输出目录"><button id="pick_output" class="secondary" type="button">选择文件夹</button></div></div><p id="output_hint" class="hint"></p>
   <div class="settings-grid export-folders"><div class="field"><label for="video_output_dir">精剪视频保存文件夹</label><div class="field-inline"><input id="video_output_dir" placeholder="服务器上的视频输出目录"><button id="pick_video_output" class="secondary" type="button">选择文件夹</button></div></div><div class="field"><label for="notes_output_dir">总结笔记保存文件夹</label><div class="field-inline"><input id="notes_output_dir" placeholder="服务器上的笔记输出目录"><button id="pick_notes_output" class="secondary" type="button">选择文件夹</button></div></div></div><p class="hint">视频与笔记各自保存到指定目录，同时保留在项目文件夹内，方便网页预览、下载和再次编辑。首次默认为工作台数据目录下的 exports\videos 与 exports\notes。</p></div></details>
-  <details class="settings-module module-html" open><summary><span>HTML 文档生成</span><small>图片与图片备注选项</small><div class="module-actions"><button type="button" data-module-save="html">保存</button><button class="secondary" type="button" data-module-undo="html">撤回</button></div></summary><div class="settings-module-body"><p class="hint">这些选项应用于“生成图文文档”输出的总结 HTML。</p><div class="html-output-options">
+  <details class="settings-module module-html" open><summary><span>HTML 文档生成</span><small>输出文件夹、图片与图片备注</small><div class="module-actions"><button type="button" data-module-save="html">保存</button><button class="secondary" type="button" data-module-undo="html">撤回</button></div></summary><div class="settings-module-body"><p class="hint">HTML 文档会额外复制到此文件夹；同一视频生成多份文档时按项目名称归档，批次任务按批次名归档。项目目录内仍保留一份，供网页预览和下载。</p><div class="field wide"><label for="html_output_dir">HTML 文档保存文件夹</label><div class="field-inline"><input id="html_output_dir" placeholder="服务器上的 HTML 文档输出目录"><button id="pick_html_output" class="secondary" type="button">选择文件夹</button></div></div><div class="html-output-options">
     <label class="option-toggle"><input id="html_include_images" type="checkbox" checked><span><strong>在 HTML 中配图</strong><small>关闭后仍会生成章节摘要，但不把截图嵌入总结 HTML。</small></span></label>
     <label class="option-toggle"><input id="html_include_image_notes" type="checkbox" checked><span><strong>显示图片备注</strong><small>包含画面说明和 OCR 识别文字；关闭后不显示图片说明文字。</small></span></label>
   </div></div></details>
@@ -95,4 +96,4 @@
   <p id="folder_error" class="error" role="status"></p><div id="folder_rows" class="folder-entries" aria-live="polite"></div>
   <div class="folder-picker-actions"><button id="folder_create" class="secondary" type="button">新建文件夹</button><button id="folder_select" type="button">选择当前文件夹</button></div>
 </dialog>
-</main><footer>视频在服务器本机处理并存储；请仅从受信任的局域网访问。</footer><script src="/app.js?v=bilibili-caption-import-20261018-1"></script></body></html>
+</main><footer>视频在服务器本机处理并存储；请仅从受信任的局域网访问。</footer><script src="/app.js?v=bilibili-batch-links-20261023-2"></script></body></html>

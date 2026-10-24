@@ -4,12 +4,16 @@ let current = null;
 let currentBatch = "";
 let batches = [];
 let projects = [];
+let taskControl = {running:false,paused:false,pause_pending:false};
+let importingBilibili = false;
 let selectedOutputMode = "data";
 let renderedSuggestionsKey = "";
 let lastStatus = "";
 let currentSegments = [];
+let currentSegmentsById = new Map();
 let currentTranscriptLayout = null;
 let currentSuggestions = [];
+let projectStatusEndpointAvailable = null;
 let currentMediaDuration = 0;
 let currentAnalysisDone = false;
 let interactionBusy = false;
@@ -25,6 +29,7 @@ let requiredInitialSetup = false;
 let bilibiliQrLoginId = "";
 let bilibiliQrExpiresAt = 0;
 let bilibiliQrTimer = 0;
+let importActionsFocusTimer = 0;
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
 function readUIState() {
@@ -53,6 +58,19 @@ function setImportPanelOpen(open) {
   panel.setAttribute("aria-expanded", String(expanded));
   $("import_content").hidden = !expanded;
   saveUIState();
+}
+function focusImportActions() {
+  const actions=document.querySelector(".import-actions");
+  if (!actions) return;
+  actions.scrollIntoView({behavior:"smooth",block:"center"});
+  const primary=$("finish_all");
+  if (!primary.disabled) primary.focus({preventScroll:true});
+  actions.classList.add("import-actions-focused");
+  clearTimeout(importActionsFocusTimer);
+  importActionsFocusTimer=setTimeout(() => {
+    actions.classList.remove("import-actions-focused");
+    importActionsFocusTimer=0;
+  },2400);
 }
 function setBatchPanelOpen(open) {
   const expanded = !!open;
@@ -182,6 +200,7 @@ function setBilibiliLoginStatus(configured) {
 function applySettings(s, module = "") {
   const applies = (...names) => !module || names.includes(module);
   if (applies("html")) {
+    $("html_output_dir").value = s.html_output_dir || "";
     $("html_include_images").checked = s.html_include_images !== "false";
     $("html_include_image_notes").checked = s.html_include_image_notes !== "false";
   }
@@ -235,6 +254,7 @@ function settingsModulePayload(module) {
   const commandFields = keys => keys.forEach(key => { result[key] = JSON.parse($(key).value || "[]"); });
   if (module === "storage") stringFields(["output_mode","output_dir","video_output_dir","notes_output_dir"]);
   else if (module === "html") {
+    result.html_output_dir = $("html_output_dir").value.trim();
     result.html_include_images = $("html_include_images").checked ? "true" : "false";
     result.html_include_image_notes = $("html_include_image_notes").checked ? "true" : "false";
   } else if (module === "video") stringFields(["video_container","video_fps","video_resolution","video_resolution_width","video_resolution_height","video_encoder","video_bitrate_mbps","video_bitrate_custom_mbps"]);
@@ -330,7 +350,29 @@ function renderBatchTasks() {
     batchStage(project,"transcribe","转写") + batchStage(project,"analyze","剪辑建议") +
     batchStage(project,"summary","图文总结") + batchStage(project,"export","精剪导出") + '</div></article>'
   ).join("") : '<p class="hint">当前批次还没有项目。</p>';
+  renderBatchProgress();
   document.querySelectorAll("#batch_tasks [data-project-open]").forEach(button => button.onclick = () => openProjectFromButton(button.dataset.projectOpen,button));
+}
+function renderBatchProgress() {
+  const batch=batches.find(row => row.id === currentBatch && row.status === "running");
+  const box=$("batch_run_progress");
+  box.hidden=!batch;
+  if (!batch) return;
+  const stepMatch=String(batch.step || "").match(/^(\d+)\s*\/\s*(\d+)/);
+  const total=Math.max(0,Number(batch.total_tasks) || Number(stepMatch?.[2]) || (batch.projects || []).length);
+  if (!total) return;
+  const completed=Math.max(0,Number(batch.completed) || 0);
+  const failed=Math.max(0,Number(batch.failed) || 0);
+  const processed=Math.min(total,completed+failed);
+  const current=Math.min(total,Math.max(1,Number(batch.current_task) || Number(stepMatch?.[1]) || processed+1));
+  const percent=Math.round(processed/total*100);
+  $("batch_run_count").textContent="第 " + current + " / " + total + " 个任务";
+  $("batch_run_percent").textContent=percent + "%";
+  $("batch_run_state").textContent="已处理 " + processed + " / " + total;
+  $("batch_run_failures").textContent="失败 " + failed;
+  $("batch_run_fill").style.width=percent + "%";
+  $("batch_run_meter").setAttribute("aria-valuenow",String(percent));
+  $("batch_run_meter").setAttribute("aria-valuetext","已处理 " + processed + " / " + total + " 个任务");
 }
 async function loadBatches(prefer = null) {
   batches = await request("/api/batches");
@@ -340,11 +382,39 @@ async function loadBatches(prefer = null) {
     batches.map(b => '<option value="' + safe(b.id) + '">' + safe(b.name) + ' · ' + b.projects.length + ' 个视频</option>').join("");
   currentBatch = runningBatch?.id || (batches.some(b => b.id === desired) ? desired : "");
   $("batch_select").value = currentBatch;
-  $("batch_select").disabled = !!runningBatch;
+  $("batch_select").disabled = importingBilibili || !!runningBatch;
   renderBatchTasks();
   if (current) {
     const project = projects.find(row => row.id === current);
     if (project) updateOperationButtons(project);
+  }
+}
+function renderTaskControl(state = taskControl) {
+  taskControl=state;
+  const button=$("pause_task");
+  const settingsOpen=!$("settings_page").hidden;
+  button.hidden=!state.running || settingsOpen;
+  button.disabled=!state.running;
+  button.textContent=state.paused ? "继续任务" : "暂停任务";
+  button.setAttribute("aria-pressed",String(!!state.paused));
+  button.classList.toggle("task-paused",!!state.paused);
+  button.classList.toggle("task-pause-pending",!!state.pause_pending);
+  button.title=state.pause_pending ? "暂停请求已发送；当前模型请求或处理步骤完成后暂停" :
+    state.paused ? "继续当前任务" : state.running ? "暂停当前任务" : "没有运行中的任务";
+}
+async function loadTaskControl() {
+  renderTaskControl(await request("/api/task-control"));
+}
+async function toggleTaskPause() {
+  const pause=!taskControl.paused;
+  const button=$("pause_task");
+  button.disabled=true;
+  try {
+    renderTaskControl(await request("/api/task-control","POST",{action:pause ? "pause" : "resume"}));
+    notice(pause ? (taskControl.pause_pending ? "已请求暂停；当前模型请求或处理步骤完成后会停住。" : "任务已暂停，点击“继续任务”可恢复。") : "任务已继续。 ");
+  } catch (error) {
+    notice(error.message);
+    await loadTaskControl().catch(() => {});
   }
 }
 function renderSuggestions(rows, switched, defaultAll) {
@@ -365,27 +435,66 @@ function formatDurationClock(value) {
   const h = Math.floor(totalSeconds / 3600), m = Math.floor(totalSeconds % 3600 / 60), s = totalSeconds % 60;
   return [h,m,s].map(x => String(x).padStart(2,"0")).join(":");
 }
+function formatSummaryDuration(value) {
+  const seconds=Number(value);
+  const safeSeconds=Math.max(0,Number.isFinite(seconds) ? seconds : 0);
+  return formatDurationClock(safeSeconds);
+}
+function mergeTimeRanges(ranges) {
+  const merged=[];
+  for (const [start,end] of ranges.sort((a,b) => a[0]-b[0] || a[1]-b[1])) {
+    const previous=merged[merged.length-1];
+    if (previous && start<=previous[1]+.001) previous[1]=Math.max(previous[1],end);
+    else merged.push([start,end]);
+  }
+  return merged;
+}
+function cutCategory(value) {
+  const category=String(value || "other").toLowerCase();
+  if (category.includes("pause") || category.includes("停顿")) return "pause";
+  if (["repeat","repetition","duplicate","重复"].some(word => category.includes(word))) return "repeat";
+  if (["filler","discourse","语气","口头禅"].some(word => category.includes(word))) return "filler";
+  if (["restart","rephrase","false_start","重新起句"].some(word => category.includes(word))) return "restart";
+  if (category.includes("manual") || category.includes("手动")) return "manual";
+  return "other";
+}
+function renderCutSummary(duration, selectedRanges, estimatedDuration) {
+  const categories=[
+    ["pause","停顿裁剪"],["repeat","重复裁剪"],["filler","语气词裁剪"],
+    ["restart","重新起句裁剪"],["manual","手动标记裁剪"],["other","其他建议裁剪"]
+  ];
+  const byCategory=new Map(categories.map(([key]) => [key,[]]));
+  for (const row of selectedRanges) {
+    const range=[row.start,row.end];
+    byCategory.get(cutCategory(row.category)).push(range);
+  }
+  const finalDuration=Math.max(0,Math.min(duration,estimatedDuration));
+  const totalRemoved=Math.max(0,duration-finalDuration);
+  const metrics=[
+    {label:"原视频长度",value:formatSummaryDuration(duration)},
+    ...categories.map(([key,label]) => ({
+      label,value:formatSummaryDuration(mergeTimeRanges(byCategory.get(key)).reduce((sum,[start,end]) => sum+end-start,0))
+    })),
+    {label:"共裁剪时长",value:formatSummaryDuration(totalRemoved),className:"cut-summary-total"},
+    {label:"预计成片长度",value:formatSummaryDuration(finalDuration),className:"cut-summary-final"}
+  ];
+  $("cut_summary_metrics").innerHTML=metrics.map(metric =>
+    '<div class="cut-summary-stat ' + (metric.className || '') + '"><span>' + metric.label + '</span><strong>' + metric.value + '</strong></div>'
+  ).join("");
+}
 function updateClipEstimate() {
   const label=$("clip_estimate");
   if (!label) return;
   const duration=Number(currentMediaDuration);
   if (!(duration>0)) {
     label.textContent="导入视频后显示原片时长";
+    $("cut_summary_metrics").innerHTML='<div class="cut-summary-stat"><span>导入视频后显示时长统计</span><strong>—</strong></div>';
     return;
   }
-  if (!currentAnalysisDone) {
-    label.textContent="原片 " + formatDurationClock(duration);
-    return;
-  }
-  const ranges=currentSuggestions.filter(row => row.selected).map(row => [
-    Math.max(0,Number(row.start)),Math.min(duration,Number(row.end))
-  ]).filter(([start,end]) => Number.isFinite(start) && Number.isFinite(end) && end>start).sort((a,b) => a[0]-b[0]);
-  const merged=[];
-  for (const [start,end] of ranges) {
-    const previous=merged[merged.length-1];
-    if (previous && start<=previous[1]+.001) previous[1]=Math.max(previous[1],end);
-    else merged.push([start,end]);
-  }
+  const selectedRanges=currentSuggestions.filter(row => row.selected).map(row => ({
+    start:Math.max(0,Number(row.start)),end:Math.min(duration,Number(row.end)),category:row.category
+  })).filter(row => Number.isFinite(row.start) && Number.isFinite(row.end) && row.end>row.start);
+  const merged=mergeTimeRanges(selectedRanges.map(row => [row.start,row.end]));
   let cursor=0,kept=0;
   for (const [start,end] of merged) {
     if (start>cursor+.02) kept+=start-cursor;
@@ -393,12 +502,18 @@ function updateClipEstimate() {
   }
   if (duration>cursor+.02) kept+=duration-cursor;
   const estimatedDuration=Math.min(duration,Math.max(0,kept));
+  renderCutSummary(duration,selectedRanges,estimatedDuration);
+  if (!currentAnalysisDone) {
+    label.textContent="原片 " + formatDurationClock(duration);
+    return;
+  }
   label.textContent="原片 " + formatDurationClock(duration) + " 新片 " + formatDurationClock(estimatedDuration);
 }
+const transcriptGraphemeSegmenter=typeof Intl.Segmenter === "function" ? new Intl.Segmenter("zh",{granularity:"grapheme"}) : null;
 function transcriptCharacters(value) {
   const parts=[];
-  if (typeof Intl.Segmenter === "function") {
-    for (const item of new Intl.Segmenter("zh",{granularity:"grapheme"}).segment(value))
+  if (transcriptGraphemeSegmenter) {
+    for (const item of transcriptGraphemeSegmenter.segment(value))
       parts.push({text:item.segment,start:item.index,end:item.index+item.segment.length});
   } else {
     let offset=0;
@@ -409,8 +524,13 @@ function transcriptCharacters(value) {
 function renderTranscript(segments) {
   updateClipEstimate();
   if (!segments?.length) { $("segments").textContent = "尚无转写文本"; return; }
-  const selected = currentSuggestions.filter(row => row.selected && row.category!=="pause");
-  const proposed = currentSuggestions.filter(row => !row.selected && row.category!=="pause");
+  const selected = currentSuggestions.filter(row => row.selected && row.category!=="pause")
+    .map(row => ({start:Number(row.start),end:Number(row.end)})).sort((a,b) => a.start-b.start || a.end-b.end);
+  const proposed = currentSuggestions.filter(row => !row.selected && row.category!=="pause")
+    .map(row => ({start:Number(row.start),end:Number(row.end)})).sort((a,b) => a.start-b.start || a.end-b.end);
+  const pauses = currentSuggestions.filter(row => row.category==="pause")
+    .sort((a,b) => Number(a.start)-Number(b.start));
+  let selectedIndex=0, proposedIndex=0, pauseIndex=0;
   const formatted=Array.isArray(currentTranscriptLayout?.markers) && currentTranscriptLayout.markers.length>0;
   const punctuation=new Map((formatted ? currentTranscriptLayout.markers : []).map(row => [String(row.segment_id)+":"+Number(row.offset_utf16),row]));
   const isPunctuation=value=>/\p{P}/u.test(value);
@@ -420,8 +540,10 @@ function renderTranscript(segments) {
     if (i) {
       const prev = segments[i - 1], gap = Number(s.start) - Number(prev.end);
       if (gap > 1) {
-        const pause = currentSuggestions.find(row => row.category === "pause" &&
-          Math.abs(Number(row.start) - Number(prev.end)) < .01 && Math.abs(Number(row.end) - Number(s.start)) < .01);
+        while (pauseIndex<pauses.length && Number(pauses[pauseIndex].start)<Number(prev.end)-.01) pauseIndex++;
+        const candidatePause=pauses[pauseIndex];
+        const pause=candidatePause && Math.abs(Number(candidatePause.start)-Number(prev.end))<.01 &&
+          Math.abs(Number(candidatePause.end)-Number(s.start))<.01 ? candidatePause : null;
         const pauseDeleted = pause ? !!pause.selected : false;
         const pauseSuggested = !!pause && !pauseDeleted;
         const prevText=String(prev.text || "");
@@ -438,8 +560,10 @@ function renderTranscript(segments) {
       if (formatted && isPunctuation(piece.text)) continue;
       const start=Number(s.start)+(Number(s.end)-Number(s.start))*piece.start/Math.max(1,String(s.text).length);
       const end=Number(s.start)+(Number(s.end)-Number(s.start))*piece.end/Math.max(1,String(s.text).length);
-      const deleted=selected.some(row => row.start<end && row.end>start);
-      const suggested=!deleted && proposed.some(row => row.start<end && row.end>start);
+      while (selectedIndex<selected.length && selected[selectedIndex].end<=start) selectedIndex++;
+      while (proposedIndex<proposed.length && proposed[proposedIndex].end<=start) proposedIndex++;
+      const deleted=selectedIndex<selected.length && selected[selectedIndex].start<end;
+      const suggested=!deleted && proposedIndex<proposed.length && proposed[proposedIndex].start<end;
       const tokenClass=deleted ? ' deleted' : suggested ? ' suggested' : '';
       const title=deleted ? '单击恢复整条删除建议；拖选可局部恢复' : suggested ? '模型建议删除，当前未选中；单击采纳' : '';
       html += '<span class="transcript-token' + tokenClass + '" data-segment-id="' + safe(s.id) + '" data-char-start="' + piece.start + '" data-char-end="' + piece.end + '" data-start="' + start + '" data-end="' + end + '"' + (title ? ' title="' + title + '"' : '') + '>' + safe(piece.text) + '</span>';
@@ -456,13 +580,37 @@ async function saveTranscriptReview(message = "审核结果已保存") {
     await request("/api/projects/" + current + "/decisions","POST",currentSuggestions.map(row => ({
       id:row.id, selected:!!row.selected, start:Number(row.start), end:Number(row.end)
     })));
-    await openProject(current);
+    await refreshProjectStatus(current);
     notice(message);
   } catch (error) {
     notice(error.message);
     renderedSuggestionsKey = "";
-    await openProject(current).catch(() => {});
+    await refreshProjectStatus(current).catch(() => {});
   } finally { interactionBusy = false; }
+}
+function transcriptTokensInRange(box,range) {
+  const tokenFor=node => {
+    const element=node?.nodeType===Node.ELEMENT_NODE ? node : node?.parentElement;
+    return element?.closest(".transcript-token") || null;
+  };
+  const first=tokenFor(range.startContainer), last=tokenFor(range.endContainer);
+  if (first && last) {
+    const tokens=[];
+    const walker=document.createTreeWalker(box,NodeFilter.SHOW_ELEMENT,{
+      acceptNode:node => node.classList.contains("transcript-token") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+    });
+    walker.currentNode=first;
+    let token=first;
+    while (token) {
+      if (range.intersectsNode(token)) tokens.push(token);
+      if (token===last) break;
+      token=walker.nextNode();
+    }
+    if (tokens.length) return tokens;
+  }
+  return [...box.querySelectorAll(".transcript-token")].filter(token => {
+    try { return range.intersectsNode(token); } catch { return false; }
+  });
 }
 async function addSelectedTextSuggestion() {
   if (!current || interactionBusy) return;
@@ -470,13 +618,11 @@ async function addSelectedTextSuggestion() {
   const box = $("segments");
   if (!selection || selection.isCollapsed || !box.contains(selection.anchorNode) || !box.contains(selection.focusNode)) return;
   const range = selection.getRangeAt(0);
-  const tokens = [...box.querySelectorAll(".transcript-token")].filter(token => {
-    try { return range.intersectsNode(token); } catch { return false; }
-  });
+  const tokens=transcriptTokensInRange(box,range);
   if (!tokens.length) return;
   const firstToken=tokens[0], lastToken=tokens[tokens.length-1];
-  const first=currentSegments.find(segment => segment.id===firstToken.dataset.segmentId);
-  const last=currentSegments.find(segment => segment.id===lastToken.dataset.segmentId);
+  const first=currentSegmentsById.get(firstToken.dataset.segmentId);
+  const last=currentSegmentsById.get(lastToken.dataset.segmentId);
   if (!first || !last) return;
   const boundaryOffset=(token,node,offset,isStart) => {
     const edge=Number(isStart ? token.dataset.charStart : token.dataset.charEnd);
@@ -497,19 +643,24 @@ async function addSelectedTextSuggestion() {
   suppressTranscriptClickUntil = Date.now() + 700;
   interactionBusy = true;
   try {
-    if (restoring)
-      await request("/api/projects/" + current + "/manual-restore","POST",{start,end});
-    else
-      await request("/api/projects/" + current + "/manual-suggestion","POST",{
+    if (restoring) {
+      const result=await request("/api/projects/" + current + "/manual-restore","POST",{start,end});
+      if (Array.isArray(result.suggestions)) currentSuggestions=result.suggestions;
+    } else {
+      const row=await request("/api/projects/" + current + "/manual-suggestion","POST",{
         start_id:first.id,end_id:last.id,start,end
       });
+      currentSuggestions.push(row);
+      currentSuggestions.sort((a,b) => Number(a.start)-Number(b.start) || Number(a.end)-Number(b.end));
+    }
     selection.removeAllRanges();
     renderedSuggestionsKey = "";
-    await openProject(current);
+    renderTranscript(currentSegments);
+    await refreshProjectStatus(current);
     notice(restoring ? "已恢复选中文字，其余删除范围保持不变" : "已标记所选字幕并保存；点击删除线可恢复整条建议");
   } catch (error) {
     notice(error.message);
-    await openProject(current).catch(() => {});
+    await refreshProjectStatus(current).catch(() => {});
   } finally { interactionBusy = false; }
 }
 async function togglePause(start, end) {
@@ -524,9 +675,14 @@ async function togglePause(start, end) {
   }
   interactionBusy = true;
   try {
-    await request("/api/projects/" + current + "/manual-pause-suggestion","POST",{start,end});
+    const row=await request("/api/projects/" + current + "/manual-pause-suggestion","POST",{start,end});
+    const index=currentSuggestions.findIndex(item => item.id===row.id);
+    if (index<0) currentSuggestions.push(row);
+    else currentSuggestions[index]=row;
+    currentSuggestions.sort((a,b) => Number(a.start)-Number(b.start) || Number(a.end)-Number(b.end));
     renderedSuggestionsKey = "";
-    await openProject(current);
+    renderTranscript(currentSegments);
+    await refreshProjectStatus(current);
     notice("已标记删除此停顿");
   } catch (error) { notice(error.message); }
   finally { interactionBusy = false; }
@@ -555,13 +711,16 @@ function renderProgress(progress) {
       String(row.label || "").startsWith("未配置总结模型");
     label.classList.toggle("status-complete",row.state==="done" && !missingSummaryModel);
     label.classList.toggle("status-error",row.state==="error");
-    if (row.state==="done" && !missingSummaryModel) label.textContent="已完成";
+    if (row.state==="done" && !missingSummaryModel) {
+      label.textContent="已完成";
+      label.title="";
+    }
     else if (row.state==="error") {
       label.textContent="失败";
       label.title=row.label || "失败";
     } else {
-      label.title="";
       label.textContent=(row.label || labels[action]) + fraction + timing;
+      label.title=action==="export" ? label.textContent : "";
     }
   }
 }
@@ -608,19 +767,19 @@ function updateOperationButtons(project) {
     ["generate_timestamp_document","timestamp_document"]];
   for (const [id,action] of entries) {
     const button=$(id), active=running && operation===action;
-    let disabled=running && !active;
-    if (!running && action==="document") disabled=!(currentSegments.length || batchHasSegments);
-    if (!running && action==="timestamp_document") disabled=!(currentSegments.length || batchHasSegments);
+    let disabled=importingBilibili || running && !active;
+    if (!importingBilibili && !running && action==="document") disabled=false;
+    if (!importingBilibili && !running && action==="timestamp_document") disabled=!(currentSegments.length || batchHasSegments);
     setOperationButton(button,active,disabled || (active && stopping),stopping);
   }
   const summaryActive=running && operation==="summary";
   $("summary_modes").hidden=summaryActive;
   $("summary_stop").hidden=!summaryActive;
   $("summary_stop").disabled=stopping || !summaryActive;
-  for (const id of ["summary_detailed","summary_medium","summary_concise"]) $(id).disabled=running;
+  for (const id of ["summary_detailed","summary_medium","summary_concise"]) $(id).disabled=importingBilibili || running;
   const oneClick=$("finish_all"), oneClickActive=running && operation==="finish_all";
-  setOperationButton(oneClick,oneClickActive,running && !oneClickActive || (oneClickActive && stopping),stopping);
-  $("open_finished_folder").disabled=running || !(batch?.projects?.length || project.output_path);
+  setOperationButton(oneClick,oneClickActive,importingBilibili || running && !oneClickActive || (oneClickActive && stopping),stopping);
+  $("open_finished_folder").disabled=importingBilibili || running || !(batch?.projects?.length || project.output_path);
 }
 function maybeAutoFormatTranscript(id,project,detail) {
   const progress=project.progress?.punctuate || {};
@@ -639,22 +798,45 @@ function maybeAutoFormatTranscript(id,project,detail) {
     if (!error.message.includes("另一任务正在运行")) notice("自动整理未能启动："+error.message);
   });
 }
+function renderProjectStatus(project) {
+  const reviewText = !project.reviewed_at ? "待审核" : project.review_mode === "automatic" ? "自动剪辑 " + (project.auto_selected_count ?? 0) + " 处" : "已审核";
+  $("project_status").textContent = project.status + " · " + project.step + " · " + reviewText + (project.model_runtime_status ? " · " + project.model_runtime_status : "");
+  $("project_error").textContent = project.error || "";
+  renderProgress(project.progress);
+  updateOperationButtons(project);
+  if (project.status === "running" && lastStatus !== project.step) { lastStatus = project.step; notice(project.step); }
+}
+async function refreshProjectStatus(id=current) {
+  if (!id) return;
+  if (projectStatusEndpointAvailable===false) return openProject(id);
+  let detail;
+  try {
+    detail=await request("/api/projects/" + id + "/status");
+    projectStatusEndpointAvailable=true;
+  } catch (error) {
+    if (error.message.includes("未找到")) {
+      projectStatusEndpointAvailable=false;
+      return openProject(id);
+    }
+    throw error;
+  }
+  if (current!==id || !detail.project) return;
+  renderProjectStatus(detail.project);
+  maybeAutoFormatTranscript(id,detail.project,{segments:currentSegments,transcript_layout:currentTranscriptLayout});
+}
 async function openProject(id) {
   const switched = current !== id;
   current = id;
   const d = await request("/api/projects/" + id);
   const p = d.project;
   currentSegments = d.segments || [];
+  currentSegmentsById = new Map(currentSegments.map(segment => [segment.id,segment]));
   currentTranscriptLayout = d.transcript_layout || null;
   currentMediaDuration = Number(d.media?.duration) || 0;
   currentAnalysisDone = p.progress?.analyze?.state === "done" || !!p.reviewed_at;
   $("detail").hidden = false;
   $("project_name").textContent = p.name;
-  const reviewText = !p.reviewed_at ? "待审核" : p.review_mode === "automatic" ? "自动剪辑 " + (p.auto_selected_count ?? 0) + " 处" : "已审核";
-  $("project_status").textContent = p.status + " · " + p.step + " · " + reviewText + (p.model_runtime_status ? " · " + p.model_runtime_status : "");
-  $("project_error").textContent = p.error || "";
-  renderProgress(p.progress);
-  updateOperationButtons(p);
+  renderProjectStatus(p);
   if (switched) $("preview").src = "/api/projects/" + id + "/source";
   const base = "/api/projects/" + id + "/files/";
   const files = p.artifacts || {video:"edited.mp4",subtitle:"edited.srt",html:"summary.html",full_html:"transcript_full.html",markdown:"summary.md",full_markdown:"transcript_full.md"};
@@ -704,7 +886,7 @@ async function start(action,options={}) {
   const payload=action === "summary" ? {summary_mode:summaryMode} : {};
   await request("/api/projects/" + current + "/" + action,"POST",payload);
   const modeLabel={detailed:"详细",concise:"简约",medium:"中档"}[summaryMode];
-  notice(action === "document" ? "正在生成无时间戳 Markdown 文档（不调用大模型）" : action === "timestamp_document" ? "正在生成时间戳 Markdown 文档" : action === "summary" ? "正在生成图文文档（" + modeLabel + "模式）" : "任务已启动：" + action);
+  notice(action === "document" ? "正在完整处理视频并生成文档（不导出视频）" : action === "timestamp_document" ? "正在根据现有字幕生成带时间戳的全文文档" : action === "summary" ? "正在生成图文文档（" + modeLabel + "模式）" : "任务已启动：" + action);
   await openProject(current);
 }
 async function upload(files, options = {}) {
@@ -738,6 +920,7 @@ async function upload(files, options = {}) {
     notice(batchId
       ? "已导入 " + items.length + " 个视频并创建批次；点击右侧按钮开始批量任务"
       : "已导入 1 个视频；点击右侧按钮选择任务");
+    if (projectId) focusImportActions();
   } catch (error) { notice(error.message); }
 }
 function readDirectoryEntries(entry) {
@@ -837,18 +1020,125 @@ async function chooseFolder(inputId) {
     }
   }
 }
+function addBilibiliLinkInput() {
+  const list=$("bilibili_link_list");
+  if (list.children.length>=99) return notice("一次最多添加 100 个 B 站链接");
+  const row=document.createElement("div");
+  row.className="field-inline bilibili-link-row";
+  const input=document.createElement("input");
+  input.type="url";
+  input.placeholder="输入下一个 B 站视频链接";
+  input.setAttribute("aria-label","下一个 B 站视频链接");
+  const remove=document.createElement("button");
+  remove.type="button";
+  remove.className="secondary";
+  remove.textContent="移除";
+  remove.setAttribute("aria-label","移除此 B 站链接输入框");
+  remove.onclick=() => row.remove();
+  row.append(input,remove);
+  list.append(row);
+  input.focus();
+}
+function formatDownloadSize(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
+  if (value < 1024) return Math.round(value) + " B";
+  const units=["KB","MB","GB","TB"];
+  let size=value/1024, unit=units[0], index=0;
+  while (size>=1024 && index<units.length-1) { size/=1024; unit=units[++index]; }
+  return size.toFixed(size<10?1:0) + " " + unit;
+}
+function showBilibiliDownloadProgress(progress) {
+  const indicator=$("bilibili_download_indicator");
+  indicator.hidden=false;
+  $("bilibili_download_label").textContent=progress.message || "正在下载 B 站视频…";
+  const bar=$("bilibili_download_bar");
+  if (typeof progress.percent === "number" && Number.isFinite(progress.percent)) {
+    bar.value=Math.max(0,Math.min(100,progress.percent));
+  } else {
+    bar.removeAttribute("value");
+  }
+  const details=[];
+  const downloaded=formatDownloadSize(progress.downloaded_bytes);
+  const total=formatDownloadSize(progress.total_bytes);
+  if (downloaded) details.push(total ? downloaded + " / " + total : downloaded);
+  if (typeof progress.speed === "number" && Number.isFinite(progress.speed) && progress.speed>0) {
+    details.push(formatDownloadSize(progress.speed)+"/s");
+  }
+  if (typeof progress.eta === "number" && Number.isFinite(progress.eta) && progress.eta>=0) {
+    const seconds=Math.round(progress.eta);
+    details.push("剩余 "+(seconds<60 ? seconds+"秒" : Math.floor(seconds/60)+"分"+(seconds%60)+"秒"));
+  }
+  if (typeof progress.percent === "number" && Number.isFinite(progress.percent)) {
+    details.unshift(Math.round(Math.max(0,Math.min(100,progress.percent)))+"%");
+  }
+  $("bilibili_download_details").textContent=details.join(" · ");
+}
+function hideBilibiliDownloadProgress() {
+  $("bilibili_download_indicator").hidden=true;
+}
+function clearCurrentSelection() {
+  current=null;
+  currentBatch="";
+  currentSegments=[];
+  currentSegmentsById.clear();
+  currentTranscriptLayout=null;
+  currentSuggestions=[];
+  currentMediaDuration=0;
+  currentAnalysisDone=false;
+  $("batch_select").value="";
+  $("detail").hidden=true;
+  $("project_name").textContent="";
+  $("project_status").textContent="";
+  $("project_error").textContent="";
+  $("preview").removeAttribute("src");
+  $("preview").load();
+  $("downloads").replaceChildren();
+  renderBatchTasks();
+  for (const id of ["transcribe","analyze","export","punctuate","generate_document","generate_timestamp_document","summary_detailed","summary_medium","summary_concise","summary_stop","finish_all","open_finished_folder"]) {
+    $(id).disabled=true;
+  }
+  saveUIState();
+}
+function pollBilibiliDownloadProgress() {
+  request("/api/bilibili/download-progress").then(progress => {
+    if (progress.active) showBilibiliDownloadProgress(progress);
+  }).catch(() => hideBilibiliDownloadProgress());
+}
 async function importFolder() {
   const path = $("workspace_folder").value.trim();
-  if (!path) throw Error("请选择工作区文件夹或填写 B 站视频链接");
+  const additionalLinks=[...$("bilibili_link_list").querySelectorAll("input")].map(input => input.value.trim()).filter(Boolean);
+  const isLinkBatch=additionalLinks.length>0;
+  const links=[path,...additionalLinks].filter(Boolean);
+  if (!links.length) throw Error("请选择工作区文件夹或填写 B 站视频链接");
+  if (isLinkBatch && links.some(value => !/bilibili\.com|b23\.tv/i.test(value)))
+    throw Error("添加多个链接时，每一项都要填写 B 站视频链接；文件夹请单独导入");
   const button = $("import_folder");
   if (button.disabled) return;
   const label = button.textContent;
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
-  button.textContent = "正在导入…";
-  notice("正在导入；B 站链接需要先下载视频，可能需要等待几分钟");
+  button.textContent = isLinkBatch ? "正在批量导入…" : "正在导入…";
+  notice(isLinkBatch ? "正在依次下载并导入 " + links.length + " 个 B 站视频；可能需要等待一段时间" : "正在导入；B 站链接需要先下载视频，可能需要等待几分钟");
+  const isBilibili=isLinkBatch || /bilibili\.com|b23\.tv/i.test(path);
+  if (isBilibili && taskControl.running) {
+    button.disabled=false;
+    button.removeAttribute("aria-busy");
+    button.textContent=label;
+    throw Error("当前任务还在运行，请完成或停止后再导入 B 站视频");
+  }
+  let downloadProgressTimer=0;
+  if (isBilibili) {
+    // Disarm the previously selected project/batch so a failed import cannot
+    // make “一键完成” start work on the previous video by mistake.
+    clearCurrentSelection();
+    importingBilibili=true;
+    $("batch_select").disabled=true;
+    showBilibiliDownloadProgress({active:true,message:"正在准备 B 站视频下载…"});
+    pollBilibiliDownloadProgress();
+    downloadProgressTimer=setInterval(pollBilibiliDownloadProgress,600);
+  }
   try {
-    const result = await request("/api/batches/import","POST",{path});
+    const result = await request("/api/batches/import","POST",isLinkBatch ? {urls:links} : {path});
     await loadProjects();
     await loadBatches(result.batch_id);
     if (result.project_id) {
@@ -863,15 +1153,32 @@ async function importFolder() {
     else if (result.count) {
       const batch = batches.find(row => row.id === result.batch_id);
       if (batch?.projects?.[0]) await openProject(batch.projects[0]);
-      notice("已导入 " + result.count + " 个视频并创建批次；点击右侧按钮开始批量任务" + (result.skipped.length ? "，跳过 " + result.skipped.length + " 个" : ""));
+      if (isLinkBatch) setBatchPanelOpen(true);
+      notice("已导入 " + result.count + (isLinkBatch ? " 个 B 站视频" : " 个视频") + "并创建批次；点击右侧按钮开始批量任务" + (result.skipped.length ? "，跳过 " + result.skipped.length + " 个" : ""));
     } else notice("导入 0 个视频" + (result.skipped.length ? "，跳过 " + result.skipped.length + " 个" : ""));
+  } catch (error) {
+    if (isBilibili) clearCurrentSelection();
+    throw error;
   } finally {
+    if (downloadProgressTimer) clearInterval(downloadProgressTimer);
+    if (isBilibili) hideBilibiliDownloadProgress();
+    importingBilibili=false;
+    if (current) {
+      const selectedProject=projects.find(row => row.id===current);
+      if (selectedProject) updateOperationButtons(selectedProject);
+    } else {
+      for (const id of ["transcribe","analyze","export","punctuate","generate_document","generate_timestamp_document","summary_detailed","summary_medium","summary_concise","summary_stop","finish_all","open_finished_folder"]) {
+        $(id).disabled=true;
+      }
+    }
+    $("batch_select").disabled=batches.some(row => row.status==="running");
     button.disabled = false;
     button.removeAttribute("aria-busy");
     button.textContent = label;
   }
 }
 async function runSelectedTask(action) {
+  if (importingBilibili) return notice("B 站视频还在导入，完成后再启动任务");
   const batch=batches.find(row => row.id === currentBatch);
   if (!batch) {
     if (!current) return notice("请先导入或打开一个项目");
@@ -896,6 +1203,7 @@ function showSettings(open, options = {}) {
   $("workspace_page").hidden = open;
   $("settings_page").hidden = !open;
   $("open_settings").hidden = open;
+  renderTaskControl();
   if (options.scroll !== false) window.scrollTo({top:0,behavior:"smooth"});
   if (options.persist !== false) saveUIState();
 }
@@ -1036,6 +1344,7 @@ $("clear_bilibili_cookies").onclick = async () => {
   finally { button.disabled = false; }
 };
 $("open_settings").onclick = () => showSettings(true);
+$("pause_task").onclick = () => toggleTaskPause();
 $("logout").onclick = async () => {
   try { await request("/auth/logout", "POST", {}); }
   finally { window.location.replace("/"); }
@@ -1045,9 +1354,11 @@ $("output_mode").onchange = updateOutputHint;
 $("video_resolution").onchange = syncVideoSettingsControls;
 $("video_bitrate_mbps").onchange = syncVideoSettingsControls;
 $("pick_workspace").onclick = () => chooseFolder("workspace_folder").catch(e => notice("文件夹选择不可用，可手动填入绝对路径：" + e.message));
+$("add_bilibili_link").onclick = () => addBilibiliLinkInput();
 $("pick_output").onclick = () => chooseFolder("output_dir").catch(e => notice("文件夹选择不可用，可手动填入绝对路径：" + e.message));
 $("pick_video_output").onclick = () => chooseFolder("video_output_dir").catch(e => notice("文件夹选择不可用，可手动填入绝对路径：" + e.message));
 $("pick_notes_output").onclick = () => chooseFolder("notes_output_dir").catch(e => notice("文件夹选择不可用，可手动填入绝对路径：" + e.message));
+$("pick_html_output").onclick = () => chooseFolder("html_output_dir").catch(e => notice("文件夹选择不可用，可手动填入绝对路径：" + e.message));
 $("pick_qwen3_asr_model").onclick = () => chooseFolder("qwen3_asr_model").catch(e => notice("模型文件夹选择不可用，可手动填入绝对路径：" + e.message));
 $("pick_qwen3_aligner_model").onclick = () => chooseFolder("qwen3_aligner_model").catch(e => notice("模型文件夹选择不可用，可手动填入绝对路径：" + e.message));
 $("folder_rows").onclick = event => {
@@ -1262,11 +1573,12 @@ $("segments").addEventListener("click", event => {
   saveTranscriptReview("已恢复整条删除建议");
 });
 const initialUIState = readUIState();
-Promise.all([loadSession(),loadAccess(),loadSettings(),loadProjects(),loadBatches(initialUIState?.batchId || "")])
+Promise.all([loadSession(),loadAccess(),loadSettings(),loadProjects(),loadBatches(initialUIState?.batchId || ""),loadTaskControl()])
   .then(() => restoreUIState(initialUIState))
   .catch(e => notice(e.message));
 setInterval(() => {
-  if (current && !interactionBusy) openProject(current).catch(() => {});
+  if (current && !interactionBusy) refreshProjectStatus(current).catch(() => {});
   loadProjects().catch(() => {});
   loadBatches().catch(() => {});
+  loadTaskControl().catch(() => {});
 },4000);

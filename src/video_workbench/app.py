@@ -194,6 +194,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, {"supported": self.auth_supported, "password_required": self.password_required})
             if parts == ["api", "settings"]:
                 return self.respond(200, self.wb.public_settings())
+            if parts == ["api", "task-control"]:
+                return self.respond(200, self.wb.task_control_status())
+            if parts == ["api", "bilibili", "download-progress"]:
+                return self.respond(200, self.wb.bilibili_download_status())
             if parts == ["api", "models"]:
                 return self.respond(200, services.models(self.wb.settings["base_url"], self.wb.api_key,
                                                           self.wb.settings.get("model_provider","local")))
@@ -204,6 +208,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, self.wb.list_projects())
             if parts == ["api", "batches"]:
                 return self.respond(200, self.wb.list_batches())
+            if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "status":
+                return self.respond(200, self.wb.project_status(parts[2]))
             if len(parts) == 3 and parts[:2] == ["api", "projects"]:
                 return self.respond(200, self.wb.detail(parts[2]))
             if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "source":
@@ -314,6 +320,12 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "settings"]:
                 self.wb.save_settings(self.data())
                 return self.respond(200, {"ok": True})
+            if parts == ["api", "task-control"]:
+                value=self.data()
+                action=value.get("action") if isinstance(value,dict) else None
+                if action not in ("pause","resume"):
+                    raise RequestError(400,"任务控制操作无效")
+                return self.respond(200,self.wb.set_task_paused(action=="pause"))
             if parts == ["api", "bilibili", "qr"]:
                 self.data()
                 return self.respond(200,self.wb.start_bilibili_qr_login())
@@ -362,7 +374,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, {"id": self.wb.create_batch(value.get("name", "上传批次"),
                     group_output=value.get("group_output", True))})
             if parts == ["api", "batches", "import"]:
-                return self.respond(200, self.wb.import_folder(self.data().get("path", "")))
+                value=self.data()
+                if not isinstance(value,dict): raise ValueError("导入请求格式无效")
+                if "urls" in value:
+                    return self.respond(200,self.wb.import_bilibili_batch(value.get("urls")))
+                return self.respond(200,self.wb.import_folder(value.get("path", "")))
             if len(parts) == 4 and parts[:2] == ["api", "batches"] and parts[3] == "cancel":
                 self.data()
                 self.wb.cancel_batch(parts[2])

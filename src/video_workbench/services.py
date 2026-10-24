@@ -1,13 +1,105 @@
 from __future__ import annotations
-import base64, http.cookiejar, ipaddress, io, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import base64, http.cookiejar, ipaddress, io, json, os, queue, re, shutil, signal, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
-from .core import parse_srt, write_srt
+from .core import _loads_json_repairing_escapes, parse_srt, write_srt
 
 GATEWAY_API_PORT=8787
 GATEWAY_MANAGE_PORT=9990
 
 class OperationCancelled(RuntimeError):
     """Raised when the user asks the current workbench operation to stop."""
+
+
+class TaskControl:
+    """Cancellation and cooperative pause controls shared with task subprocesses."""
+    def __init__(self, cancel_event, resume_event):
+        self.cancel_event=cancel_event
+        self.resume_event=resume_event
+        self.parked_event=threading.Event()
+
+    def is_set(self):
+        return self.cancel_event.is_set()
+
+    def wait_if_paused(self, process=None):
+        suspended=False
+        try:
+            while not self.resume_event.wait(.2):
+                if self.cancel_event.is_set():
+                    raise OperationCancelled("用户已停止任务")
+                if process is not None and process.poll() is None and not suspended:
+                    suspended=_suspend_process(process)
+                if process is None or process.poll() is not None or suspended:
+                    self.parked_event.set()
+                else:
+                    self.parked_event.clear()
+            if self.cancel_event.is_set():
+                raise OperationCancelled("用户已停止任务")
+        finally:
+            self.parked_event.clear()
+            if suspended and process is not None and process.poll() is None:
+                _resume_process(process)
+
+
+def _suspend_process(process):
+    try:
+        if os.name == "nt":
+            import ctypes
+            suspend=ctypes.WinDLL("ntdll").NtSuspendProcess
+            suspend.argtypes=[ctypes.c_void_p]
+            suspend.restype=ctypes.c_long
+            return suspend(process._handle)==0
+        process.send_signal(signal.SIGSTOP)
+        return True
+    except (AttributeError,OSError,ValueError):
+        return False
+
+
+def _resume_process(process):
+    try:
+        if os.name == "nt":
+            import ctypes
+            resume=ctypes.WinDLL("ntdll").NtResumeProcess
+            resume.argtypes=[ctypes.c_void_p]
+            resume.restype=ctypes.c_long
+            resume(process._handle)
+        else:
+            process.send_signal(signal.SIGCONT)
+    except (AttributeError,OSError,ValueError):
+        pass
+
+
+def _check_task_control(control, process=None):
+    if control is None:
+        return
+    wait_if_paused=getattr(control,"wait_if_paused",None)
+    if wait_if_paused:
+        wait_if_paused(process)
+    if control.is_set():
+        raise OperationCancelled("用户已停止任务")
+
+
+def _load_asr_json(path):
+    text=path.read_text(encoding="utf-8-sig")
+    repaired=text
+    repairs=0
+    while True:
+        try:
+            return json.loads(repaired,strict=False)
+        except json.JSONDecodeError as exc:
+            if exc.msg not in ("Invalid \\escape", "Invalid \\uXXXX escape"):
+                raise RuntimeError(f"ASR 输出 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+            if exc.pos>=len(repaired) or repaired[exc.pos]!="\\" or repairs>=10000:
+                raise RuntimeError(f"ASR 输出 JSON 含无法修复的反斜杠（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
+            # Preserve literal Windows paths and transcript text such as "C:\\Users\\...".
+            repaired=repaired[:exc.pos]+"\\"+repaired[exc.pos:]
+            repairs+=1
+
+def _load_external_json(text,label):
+    """Parse JSON produced by external tools and APIs, preserving literal paths."""
+    try:
+        return _loads_json_repairing_escapes(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} 返回的 JSON 格式无效（第 {exc.lineno} 行，第 {exc.colno} 列）") from exc
 
 def _terminate_process(process):
     if process.poll() is not None: return
@@ -116,14 +208,12 @@ def reveal_path(path):
     return target
 
 def run(argv,timeout=3600,cancel_event=None):
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,errors="replace",shell=False)
     deadline=time.monotonic()+timeout
     try:
         while True:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             remaining=deadline-time.monotonic()
             if remaining<=0:
                 _terminate_process(process)
@@ -174,12 +264,15 @@ def normalize_bilibili_cookie_file(value):
     kept=[header]; has_sessdata=False
     for line in lines[1:]:
         if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")): continue
-        cookie_line=line[len("#HttpOnly_"):] if line.startswith("#HttpOnly_") else line
+        is_httponly=line.startswith("#HttpOnly_")
+        cookie_line=line[len("#HttpOnly_"):] if is_httponly else line
         fields=cookie_line.split("\t")
         if len(fields)!=7: raise ValueError("Cookie 文件格式无效，请重新导出 Netscape 格式 cookies.txt")
         domain=fields[0].lstrip(".").lower()
         if domain!="bilibili.com" and not domain.endswith(".bilibili.com"): continue
-        kept.append(line)
+        # Netscape requires the leading dot and include-subdomains flag to agree.
+        fields[1]="TRUE" if fields[0].startswith(".") else "FALSE"
+        kept.append(("#HttpOnly_" if is_httponly else "")+"\t".join(fields))
         if fields[5]=="SESSDATA" and fields[6]: has_sessdata=True
     if not has_sessdata:
         raise ValueError("Cookie 文件中没有找到 B 站 SESSDATA 登录信息，请先在浏览器登录 B 站后重新导出")
@@ -265,7 +358,7 @@ def bilibili_qr_login_poll(login):
         if normalized!="bilibili.com" and not normalized.endswith(".bilibili.com"):
             continue
         domain_field=("#HttpOnly_" if cookie.has_nonstandard_attr("HttpOnly") else "")+domain
-        fields=(domain_field,"TRUE" if cookie.domain_initial_dot else "FALSE",cookie.path or "/",
+        fields=(domain_field,"TRUE" if domain.startswith(".") else "FALSE",cookie.path or "/",
                 "TRUE" if cookie.secure else "FALSE",str(cookie.expires or 0),cookie.name,cookie.value)
         rows.append("\t".join(fields))
     try:
@@ -274,7 +367,7 @@ def bilibili_qr_login_poll(login):
         raise RuntimeError("B 站已确认扫码，但没有收到有效登录 Cookie，请重新扫码") from exc
     return {"status":"success","cookies":cookie_file}
 
-def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
+def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None,progress_callback=None):
     """Download one Bilibili video and available captions using yt-dlp."""
     try:
         from yt_dlp import YoutubeDL
@@ -282,10 +375,37 @@ def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
         raise RuntimeError("B 站链接导入需要 yt-dlp。请在工作台 Python 环境执行：python -m pip install yt-dlp") from exc
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=False)
+    def report_progress(status, downloaded_bytes=None, total_bytes=None, speed=None, eta=None, message=""):
+        if not progress_callback: return
+        percent=None
+        if total_bytes and downloaded_bytes is not None:
+            percent=max(0,min(100,downloaded_bytes*100/total_bytes))
+        try:
+            progress_callback({"phase":status,"percent":percent,"downloaded_bytes":downloaded_bytes,
+                               "total_bytes":total_bytes,"speed":speed,"eta":eta,"message":message})
+        except Exception:
+            # Progress reporting must never interrupt the download itself.
+            pass
+    def progress_hook(data):
+        status=data.get("status")
+        if status not in ("downloading","finished","error"): return
+        downloaded=data.get("downloaded_bytes")
+        total=data.get("total_bytes") or data.get("total_bytes_estimate")
+        if status=="downloading":
+            message="正在下载 B 站视频或字幕文件"
+        elif status=="finished":
+            message="当前文件下载完成，正在处理其他资源或合并视频"
+            downloaded=total or downloaded
+        else:
+            message="B 站视频文件下载失败"
+        report_progress(status,downloaded,total,data.get("speed"),data.get("eta"),message)
+
+    report_progress("preparing",message="正在获取 B 站视频信息…")
     options={"outtmpl":str(directory/"%(id)s.%(ext)s"),
              "format":"bestvideo*+bestaudio/best","merge_output_format":"mkv",
              "writesubtitles":True,"writeautomaticsub":True,"subtitleslangs":["all"],
              "subtitlesformat":"srt/vtt/best","noplaylist":True,"max_filesize":25*1024**3,
+             "progress_hooks":[progress_hook],"concurrent_fragment_downloads":8,
              "retries":3,"fragment_retries":3,"socket_timeout":30,"quiet":True,"no_warnings":True}
     if ffmpeg and ffmpeg!="ffmpeg": options["ffmpeg_location"]=ffmpeg
     if cookiefile: options["cookiefile"]=str(cookiefile)
@@ -314,6 +434,8 @@ def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
                 "title":str(info.get("title") or info.get("id") or video.stem)}
     except Exception as exc:
         shutil.rmtree(directory,ignore_errors=True)
+        if "invalid Netscape format cookies file" in str(exc):
+            raise RuntimeError("下载 B 站视频失败：登录 Cookie 文件格式无效，请清除旧登录并重新扫码。") from None
         raise RuntimeError(f"下载 B 站视频失败：{exc}") from exc
 
 def stop_local_model(base,key,mode="gateway",timeout=240):
@@ -331,7 +453,7 @@ def stop_local_model(base,key,mode="gateway",timeout=240):
     request=urllib.request.Request(url,data=b"",headers={"Accept":"application/json"},method="POST")
     try:
         with urllib.request.urlopen(request,timeout=timeout) as response:
-            result=json.load(response)
+            result=_load_external_json(response.read().decode("utf-8-sig"),"网关停止接口")
     except urllib.error.HTTPError as exc:
         detail=exc.read(1200).decode("utf-8","replace")
         raise RuntimeError(f"网关停止推理引擎 HTTP {exc.code}: {detail}") from exc
@@ -350,7 +472,7 @@ def stop_local_model(base,key,mode="gateway",timeout=240):
 
 def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
     """Read FFmpeg's real output timestamp, not an estimated clock-based percent."""
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     command=argv[:1]+["-progress","pipe:1","-nostats"]+argv[1:]
     process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                              text=True,errors="replace",bufsize=1,shell=False)
@@ -365,9 +487,7 @@ def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
     try:
         stdout_done=False
         while not stdout_done:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             try: line=messages.get(timeout=.2)
             except queue.Empty:
                 if process.poll() is not None and not stdout_thread.is_alive(): break
@@ -381,9 +501,7 @@ def run_ffmpeg_progress(argv,duration,callback,cancel_event=None):
                 callback(min(99,max(0,round(seconds/max(duration,.001)*100))))
         deadline=time.monotonic()+21600
         while process.poll() is None:
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process(process)
-                raise OperationCancelled("用户已停止任务")
+            _check_task_control(cancel_event,process)
             if time.monotonic()>=deadline:
                 _terminate_process(process)
                 raise subprocess.TimeoutExpired(command,21600)
@@ -399,7 +517,7 @@ def probe(tool,source,ffmpeg="ffmpeg"):
     try: probe_exe=executable(tool)
     except RuntimeError: probe_exe=None
     if probe_exe:
-        data=json.loads(run([probe_exe,"-v","error","-show_format","-show_streams","-of","json",str(source)],60))
+        data=_load_external_json(run([probe_exe,"-v","error","-show_format","-show_streams","-of","json",str(source)],60),"ffprobe")
         duration=float(data.get("format",{}).get("duration",0)); streams=data.get("streams",[])
         if duration<=0 or not any(s.get("codec_type")=="video" for s in streams): raise RuntimeError("无法读取有效视频")
         video=next(s for s in streams if s.get("codec_type")=="video")
@@ -437,7 +555,7 @@ def extract_audio(tool,source,target,cancel_event=None):
     temporary=target.with_name(f".{target.stem}.{uuid.uuid4().hex}.partial{target.suffix}")
     try:
         run([executable(tool),"-hide_banner","-loglevel","error","-y","-i",str(source),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(temporary)],14400,cancel_event)
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         temporary.replace(target)
     finally: temporary.unlink(missing_ok=True)
 
@@ -449,16 +567,31 @@ def run_asr(template,audio,target,cancel_event=None,substitutions=None):
         arg=str(value)
         for key,replacement in replacements.items(): arg=arg.replace("{"+key+"}",str(replacement))
         argv.append(arg)
-    argv[0]=executable(argv[0]); run(argv,14400,cancel_event)
+    target=Path(target)
+    target.unlink(missing_ok=True)
+    argv[0]=executable(argv[0])
+    try:
+        run(argv,14400,cancel_event)
+    except OperationCancelled:
+        raise
+    except RuntimeError as exc:
+        if target.is_file():
+            try:
+                return _load_asr_json(target)
+            except RuntimeError:
+                pass
+        if "Invalid \\escape" in str(exc):
+            raise RuntimeError("ASR 外部命令内部解析 JSON 失败，且没有生成可用结果；请检查 ASR 脚本或模型配置文件。") from exc
+        raise
     if not target.is_file(): raise RuntimeError("ASR 未生成 JSON 文件")
-    return json.loads(target.read_text(encoding="utf-8"))
+    return _load_asr_json(target)
 
 def external_json(template, substitutions, target, timeout=3600,cancel_event=None):
     if not isinstance(template,list) or not template: return None
     argv=[str(x).format(**substitutions) for x in template]
     argv[0]=executable(argv[0]); run(argv,timeout,cancel_event)
     if not target.is_file(): raise RuntimeError("外部工具未生成 JSON 文件")
-    return json.loads(target.read_text(encoding="utf-8"))
+    return _load_external_json(target.read_text(encoding="utf-8-sig"),"外部工具")
 
 def model_url(base,provider="local"):
     from urllib.parse import urlparse
@@ -494,25 +627,34 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
     headers={"Content-Type":"application/json"}
     if key: headers["Authorization"]="Bearer "+key
     req=urllib.request.Request(url,data=body,headers=headers,method="POST")
+    invalid_response_retries=0
     for attempt in range(12):
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         try:
-            with urllib.request.urlopen(req,timeout=240) as response: data=json.load(response)
+            with urllib.request.urlopen(req,timeout=240) as response:
+                raw=response.read().decode("utf-8-sig")
+            try:
+                data=_loads_json_repairing_escapes(raw)
+            except json.JSONDecodeError as exc:
+                if invalid_response_retries<1:
+                    invalid_response_retries+=1
+                    continue
+                raise RuntimeError("模型服务连续返回无法解析的 Chat Completions 响应；请检查服务端响应格式后重试") from exc
             break
         except urllib.error.HTTPError as exc:
             detail=exc.read(600).decode("utf-8","replace")
-            try: error_type=json.loads(detail).get("error",{}).get("type")
+            try: error_type=_loads_json_repairing_escapes(detail).get("error",{}).get("type")
             except (ValueError,AttributeError): error_type=None
             transient_gateway_error=(exc.code==503 and error_type in ("not_ready","host_offline","switch_stopping"))
             transient_backend_error=(exc.code==502 and error_type=="backend_unreachable")
             if retry_unavailable and (transient_gateway_error or transient_backend_error) and attempt<11:
                 delay=min(5+attempt*2,20); deadline=time.monotonic()+delay
                 while time.monotonic()<deadline:
-                    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+                    _check_task_control(cancel_event)
                     time.sleep(min(.2,deadline-time.monotonic()))
                 continue
             raise RuntimeError(f"模型服务 HTTP {exc.code}: "+detail) from exc
-    if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+    _check_task_control(cancel_event)
     try:
         choice=data["choices"][0]
         content=choice["message"].get("content")
@@ -526,7 +668,8 @@ def chat(base,model,key,messages,max_tokens=1600,chat_template_kwargs=None,retry
 def models(base,key,provider="local"):
     req=urllib.request.Request(model_url(base,provider)+"/models")
     if key: req.add_header("Authorization","Bearer "+key)
-    with urllib.request.urlopen(req,timeout=12) as response: value=json.load(response)
+    with urllib.request.urlopen(req,timeout=12) as response:
+        value=_load_external_json(response.read().decode("utf-8-sig"),"模型列表接口")
     return [{"id":m.get("id"),"active":m.get("active")} for m in value.get("data",[]) if m.get("id")]
 
 def frame(tool,source,second,target,cancel_event=None,max_width=960):
@@ -684,7 +827,7 @@ def export_video(tool,source,target,keeps,has_audio,progress=None,fps="source",b
     partial=target.with_name(f".{target.stem}.{uuid.uuid4().hex}.partial{target.suffix}")
     try:
         _export_one(tool,source,partial,keeps,has_audio,progress,fps,bitrate,encoder,resolution,cancel_event,subtitle_path)
-        if cancel_event is not None and cancel_event.is_set(): raise OperationCancelled("用户已停止任务")
+        _check_task_control(cancel_event)
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)

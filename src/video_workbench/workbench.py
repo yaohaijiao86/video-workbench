@@ -12,7 +12,7 @@ DEFAULTS={"ffmpeg":"ffmpeg","ffprobe":"ffprobe","asr_command":[],
           "model_provider":"local","base_url":"http://127.0.0.1:8787/v1","local_model_lifecycle":"gateway","text_model":"","summary_model":"","vision_model":"",
           "model_profiles":[],"model_roles":{"editing":[],"summary":[],"vision":[]},
           "model_config_version":"2",
-          "output_mode":"data","output_dir":"","video_output_dir":"","notes_output_dir":"","video_container":"source","video_fps":"source",
+          "output_mode":"data","output_dir":"","video_output_dir":"","notes_output_dir":"","html_output_dir":"","video_container":"source","video_fps":"source",
           "video_resolution":"source","video_resolution_width":"1920","video_resolution_height":"1080",
           "video_bitrate_mbps":"source","video_bitrate_custom_mbps":"5","video_encoder":"h264_nvenc",
           "html_include_images":"true","html_include_image_notes":"true"}
@@ -217,6 +217,7 @@ def chapters_from_ranges(rows,paragraphs):
         if not isinstance(bullets,list): bullets=[]
         chapters.append({"start":units[0]["start"],"end":units[-1]["end"],"start_id":units[0]["id"],
             "end_id":units[-1]["id"],"title":title,"summary":clean_summary_text(row.get("summary","")),
+            "viewpoint":clean_summary_text(row.get("viewpoint",""),500),
             "bullets":[clean_summary_text(item,500) for item in bullets[:8] if clean_summary_text(item,500)],
             "visual_id":visual_id,"visual_description":clean_summary_text(row.get("visual_description",""),300),
             "paragraphs":units})
@@ -235,6 +236,10 @@ class Workbench:
         self.bilibili_cookies_path=self.root/".bilibili-cookies.txt"
         self.bilibili_qr_logins={}
         self.bilibili_qr_lock=threading.RLock()
+        self.bilibili_download_lock=threading.Lock()
+        self.bilibili_download_progress_lock=threading.RLock()
+        self.bilibili_download_progress={"active":False,"phase":"idle","percent":None,
+            "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,"message":""}
         self.timing_path=self.root/"timing_history.json"
         self.timing_history=json.loads(self.timing_path.read_text(encoding="utf-8")) if self.timing_path.exists() else {}
         saved_output_settings={}
@@ -295,8 +300,10 @@ class Workbench:
         self.settings["model_config_version"]="2"
         self.settings["video_output_dir"] = self.settings.get("video_output_dir") or str(self.root/"exports"/"videos")
         self.settings["notes_output_dir"] = self.settings.get("notes_output_dir") or str(self.root/"exports"/"notes")
+        self.settings["html_output_dir"] = self.settings.get("html_output_dir") or str(self.root/"exports"/"html")
         Path(self.settings["video_output_dir"]).expanduser().mkdir(parents=True,exist_ok=True)
         Path(self.settings["notes_output_dir"]).expanduser().mkdir(parents=True,exist_ok=True)
+        Path(self.settings["html_output_dir"]).expanduser().mkdir(parents=True,exist_ok=True)
         # Ignore options removed from the current settings UI.
         self.settings.pop("finish_mode",None)
         self.settings.pop("model_stop_command",None)
@@ -305,6 +312,9 @@ class Workbench:
         self.active_local_models={}
         self.busy=threading.Lock()
         self.cancel_event=threading.Event()
+        self.task_resume_event=threading.Event()
+        self.task_resume_event.set()
+        self.task_control=services.TaskControl(self.cancel_event,self.task_resume_event)
         self.active_pid=None
         self.active_operation=None
         self.active_batch_id=None
@@ -451,8 +461,8 @@ class Workbench:
                 if key=="model_provider" and value not in ("local","online"): raise ValueError("模型服务类型无效")
                 if key=="local_model_lifecycle" and value not in ("gateway","manual"): raise ValueError("本地模型生命周期设置无效")
                 if key=="output_dir" and value and not Path(value).is_absolute(): raise ValueError("指定保存目录必须是绝对路径")
-                if key in ("video_output_dir","notes_output_dir") and value and not Path(value).is_absolute():
-                    raise ValueError("视频和笔记保存目录必须是绝对路径")
+                if key in ("video_output_dir","notes_output_dir","html_output_dir") and value and not Path(value).is_absolute():
+                    raise ValueError("输出文件夹必须是绝对路径")
                 if key=="video_container" and value not in ("source","mp4","mkv","mov","webm"): raise ValueError("视频封装格式无效")
                 if key=="video_fps" and value not in ("source","23.976","24","25","29.97","30","50","59.94","60"):
                     raise ValueError("视频帧率无效")
@@ -653,17 +663,87 @@ class Workbench:
         return {"batch_id":bid,"count":len(self.batches[bid]["projects"]),"skipped":skipped}
     def import_bilibili(self,value):
         url=services.normalize_bilibili_url(value)
+        if not self.bilibili_download_lock.acquire(blocking=False):
+            raise RuntimeError("已有 B 站视频正在下载，请稍后再试")
+        self._set_bilibili_download_progress({"active":True,"phase":"preparing","percent":None,
+            "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,
+            "message":"正在准备 B 站视频下载…"})
+        try:
+            return self._import_bilibili_locked(url)
+        finally:
+            self._set_bilibili_download_progress({"active":False,"phase":"idle","percent":None,
+                "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,"message":""})
+            self.bilibili_download_lock.release()
+    def import_bilibili_batch(self,values):
+        if not isinstance(values,list): raise ValueError("B 站链接列表格式无效")
+        raw_urls=[str(value or "").strip() for value in values if str(value or "").strip()]
+        if not raw_urls: raise ValueError("请至少填写一个 B 站视频链接")
+        if len(raw_urls)>100: raise ValueError("一次最多批量导入 100 个 B 站视频")
+        urls=[services.normalize_bilibili_url(value) for value in raw_urls]
+        if len(urls)==1: return self.import_bilibili(urls[0])
+        if not self.bilibili_download_lock.acquire(blocking=False):
+            raise RuntimeError("已有 B 站视频正在下载，请稍后再试")
+        bid=""
+        self._set_bilibili_download_progress({"active":True,"phase":"preparing","percent":None,
+            "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,
+            "message":f"准备批量导入 {len(urls)} 个 B 站视频…"})
+        try:
+            batch_name="B站链接批次_"+time.strftime("%Y%m%d_%H%M%S")+"_"+uuid.uuid4().hex[:4]
+            bid=self.create_batch(batch_name,group_output=True)
+            skipped=[]
+            for index,url in enumerate(urls,1):
+                prefix=f"第 {index}/{len(urls)} 个："
+                self._set_bilibili_download_progress({"active":True,"phase":"preparing","percent":None,
+                    "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,
+                    "message":prefix+"正在准备下载 B 站视频…"})
+                try:
+                    self._import_bilibili_locked(url,batch_id=bid,progress_prefix=prefix)
+                except Exception as exc:
+                    skipped.append({"index":index,"url":url,"error":str(exc)[:500]})
+            imported=len(self.batches[bid]["projects"])
+            if not imported:
+                details="；".join(f"第 {row['index']} 个链接：{row['error']}" for row in skipped)[:700]
+                with self.index_lock:
+                    self.batches.pop(bid,None)
+                    self._save_json(self.batches_path,self.batches)
+                raise RuntimeError("所有 B 站链接都未能导入"+("："+details if details else ""))
+            with self.index_lock:
+                batch=self.batches[bid]
+                batch["step"]=f"已导入 {imported}/{len(urls)} 个 B 站视频"+(f"，{len(skipped)} 个失败" if skipped else "")
+                batch["import_failed"]=len(skipped)
+                self._save_json(self.batches_path,self.batches)
+            return {"batch_id":bid,"count":imported,"skipped":skipped}
+        finally:
+            self._set_bilibili_download_progress({"active":False,"phase":"idle","percent":None,
+                "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,"message":""})
+            self.bilibili_download_lock.release()
+    def _set_bilibili_download_progress(self,value):
+        with self.bilibili_download_progress_lock:
+            self.bilibili_download_progress.update(value)
+    def bilibili_download_status(self):
+        with self.bilibili_download_progress_lock:
+            return dict(self.bilibili_download_progress)
+    def _import_bilibili_locked(self,url,batch_id=None,progress_prefix=""):
         download_id=uuid.uuid4().hex[:8]
         downloads=self.root/"downloads"
         downloads.mkdir(parents=True,exist_ok=True)
+        def report_progress(value):
+            progress=dict(value)
+            if progress_prefix and progress.get("message"):
+                progress["message"]=progress_prefix+str(progress["message"])
+            self._set_bilibili_download_progress(progress)
         result=services.download_bilibili(url,downloads/("bilibili_"+download_id),
             self.settings.get("ffmpeg","ffmpeg"),
-            self.bilibili_cookies_path if self.bilibili_cookies_path.is_file() else None)
+            self.bilibili_cookies_path if self.bilibili_cookies_path.is_file() else None,
+            progress_callback=report_progress)
+        self._set_bilibili_download_progress({"phase":"importing","percent":100,
+            "downloaded_bytes":None,"total_bytes":None,"speed":None,"eta":None,
+            "message":progress_prefix+"下载完成，正在导入视频和字幕…"})
         video=result["video"]
         filename=safe_name(result["title"])+video.suffix.lower()
         named_video=video.with_name(filename)
         if named_video!=video: video.rename(named_video)
-        bid=self.create_batch(result["title"],str(named_video.parent),group_output=False)
+        bid=batch_id or self.create_batch(result["title"],str(named_video.parent),group_output=False)
         pid=self.create(named_video.name,None,named_video.stat().st_size,named_video,bid)
         project=self.read(pid,"project.json")
         project["source_url"]=url
@@ -708,9 +788,23 @@ class Workbench:
         p=self.read(pid,"project.json"); p.update(status=status,step=step,error=error,updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         self.write(pid,"project.json",p)
     def check_cancelled(self):
+        self.task_control.wait_if_paused()
         if self.cancel_event.is_set(): raise services.OperationCancelled("用户已停止任务")
+    def task_control_status(self):
+        running=self.busy.locked()
+        paused=running and not self.task_resume_event.is_set()
+        parked=paused and self.task_control.parked_event.is_set()
+        return {"running":running,"paused":paused,"pause_pending":paused and not parked,
+                "operation":self.active_operation,"project_id":self.active_pid,"batch_id":self.active_batch_id}
+    def set_task_paused(self,paused):
+        if not isinstance(paused,bool): raise ValueError("暂停状态无效")
+        if not self.busy.locked(): raise RuntimeError("当前没有运行中的任务")
+        if paused: self.task_resume_event.clear()
+        else: self.task_resume_event.set()
+        return self.task_control_status()
     def begin_operation(self,pid,operation):
         self.cancel_event.clear()
+        self.task_resume_event.set()
         self.active_pid=pid
         self.active_operation=operation
         project=self.read(pid,"project.json")
@@ -727,6 +821,7 @@ class Workbench:
         self.active_pid=None
         self.active_operation=None
         self.cancel_event.clear()
+        self.task_resume_event.set()
     def cancel(self,pid):
         if not self.busy.locked() or self.active_pid!=pid:
             raise RuntimeError("这个项目当前没有可停止的任务")
@@ -868,6 +963,18 @@ class Workbench:
             "transcript_layout":layout,
             "suggestions":self.read(pid,"suggestions.json",[]),
             "summary":self.read(pid,"summary.json")}
+    def project_status(self,pid):
+        project=self.read(pid,"project.json")
+        project.setdefault("output_path",str(self.folder(pid)))
+        artifacts=self.available_artifacts(pid)
+        progress=project.setdefault("progress",{})
+        for action,filename in (("transcribe","segments.json"),("analyze","suggestions.json"),
+                                ("export",artifacts["video"]),("summary",artifacts["html"]),
+                                ("notes",artifacts["markdown"]),("document",artifacts["full_markdown"]),
+                                ("timestamp_document",artifacts["timestamp_markdown"])):
+            if action not in progress and (self.folder(pid)/filename).is_file():
+                progress[action]={"state":"done","percent":100,"label":"已完成"}
+        return {"project":project}
     def transcript_text(self,pid,segments=None,layout=None):
         if segments is None: segments=self.read(pid,"segments.json",[])
         if layout is None: layout=self.read(pid,"transcript_layout.json")
@@ -890,7 +997,7 @@ class Workbench:
             self.remote_model_used=True
             kwargs.pop("chat_template_kwargs",None)
         result=services.chat(base,model,key,messages,max_tokens,provider=provider,
-                             cancel_event=self.cancel_event,**kwargs)
+                             cancel_event=self.task_control,**kwargs)
         self.check_cancelled()
         return result
 
@@ -1017,13 +1124,16 @@ class Workbench:
             if summary.get("mode")=="transcript_only":
                 reason=str(summary.get("fallback_reason") or "").strip()
                 if reason:
-                    raise RuntimeError("图文总结模型调用失败，已回退生成字幕版 HTML："+reason[:500])
+                    return "已生成字幕版 HTML（模型未返回可用章节内容）"
                 return "未配置总结模型，仅生成字幕版 HTML"
             chapters=summary.get("chapters",[])
             return f"已生成图文总结（{len(chapters)} 个主题章节）"
         return "已完成"
     def launch(self,pid,action,options=None):
         if action not in ACTIONS: raise ValueError("未知处理步骤")
+        if action=="document":
+            self.launch_all(pid,mode="document")
+            return
         options=options if isinstance(options,dict) else {}
         summary_mode=str(options.get("summary_mode") or "detailed") if action=="summary" else "detailed"
         if action=="summary" and summary_mode not in SUMMARY_MODES:
@@ -1039,7 +1149,7 @@ class Workbench:
         def target():
             try:
                 self.check_cancelled()
-                if action not in ("transcribe","punctuate"):
+                if action not in ("transcribe","punctuate","timestamp_document"):
                     self.ensure_transcript_layout(pid)
                 if action=="export":
                     self.finish_model_session(pid)
@@ -1074,21 +1184,27 @@ class Workbench:
         all_projects=list(batch["projects"])
         if mode=="export":
             targets=[pid for pid in all_projects if self.read(pid,"project.json").get("reviewed_at")]
-        elif mode in ("document","timestamp_document"):
+        elif mode=="timestamp_document":
             targets=[pid for pid in all_projects if self.read(pid,"segments.json",[])]
         else:
             targets=all_projects
         if not targets:
-            message=("该批次没有可处理的项目；批量导出前请逐项保存审核结果" if mode=="export"
-                     else "该批次没有字幕；请先转写视频或导入字幕")
+            if mode=="export":
+                message="该批次没有可处理的项目；批量导出前请逐项保存审核结果"
+            elif mode=="timestamp_document":
+                message="该批次没有可生成时间戳文档的字幕；请先转写视频或导入字幕"
+            else:
+                message="该批次没有可处理的视频项目"
             raise ValueError(message)
         if not self.busy.acquire(blocking=False): raise RuntimeError("另一任务正在运行，请稍后")
         try:
             self.cancel_event.clear()
+            self.task_resume_event.set()
             self.active_pid=None
             self.active_operation="batch"
             self.active_batch_id=bid
-            batch.update(status="running",mode=mode,step="开始批量处理",completed=0,failed=0,skipped=len(all_projects)-len(targets))
+            batch.update(status="running",mode=mode,step="开始批量处理 · 按顺序逐个视频制作",completed=0,failed=0,
+                          skipped=len(all_projects)-len(targets),total_tasks=len(targets),current_task=0,current_project_id="")
             self._save_json(self.batches_path,self.batches)
         except Exception:
             self.active_pid=None
@@ -1106,17 +1222,24 @@ class Workbench:
                         self.check_cancelled()
                         active_pid=pid
                         self.active_pid=pid
+                        batch.update(current_task=index,current_project_id=pid)
+                        self._save_json(self.batches_path,self.batches)
                         project=self.read(pid,"project.json")
                         project["active_operation"]="batch"
                         project.pop("stop_requested",None)
                         self.write(pid,"project.json",project)
                         self.status(pid,"running",f"批次 {index}/{len(targets)}")
+                        if mode=="document": self.progress(pid,"document","running",0,"转写、分析并整理文档")
                         if mode == "prepare":
                             actions = (["transcribe"] if not self.read(pid,"segments.json",[]) else []) + ["analyze", "summary"]
                         elif mode == "finish_all":
                             has_segments = bool(self.read(pid,"segments.json",[]))
                             if has_segments: self.progress(pid,"transcribe","done",100,"已有字幕，跳过转写")
                             actions = (["transcribe"] if not has_segments else []) + ["analyze", "summary", "export"]
+                        elif mode == "document":
+                            has_segments = bool(self.read(pid,"segments.json",[]))
+                            if has_segments: self.progress(pid,"transcribe","done",100,"已有字幕，跳过转写")
+                            actions = (["transcribe"] if not has_segments else []) + ["analyze", "summary"]
                         else:
                             actions = [mode]
                         for action in actions:
@@ -1129,7 +1252,7 @@ class Workbench:
                             self.progress(pid,action,"running",None,"正在启动")
                             batch["step"]=f"{index}/{len(targets)} · {self.read(pid,'project.json')['name']} · {action}"
                             self._save_json(self.batches_path,self.batches)
-                            if action not in ("transcribe","punctuate") and (mode!="finish_all" or action=="analyze"):
+                            if action not in ("transcribe","punctuate","timestamp_document") and (mode not in ("finish_all","document") or action=="analyze"):
                                 self.ensure_transcript_layout(pid)
                             if action=="export":
                                 if mode=="finish_all":
@@ -1141,7 +1264,7 @@ class Workbench:
                                     project["auto_selected_count"]=selected_count
                                     self.write(pid,"project.json",project)
                                 self.finish_model_session(pid)
-                            if action=="summary" and mode=="finish_all":
+                            if action=="summary" and mode in ("finish_all","document"):
                                 self.task_summary(pid,summary_mode="detailed")
                             else:
                                 getattr(self,"task_"+action)(pid)
@@ -1153,11 +1276,16 @@ class Workbench:
                             label=self.completion_label(pid,action)
                             self.progress(pid,action,"done",100,label)
                         batch_label={"finish_all":"一键完成"}.get(mode,mode)
+                        if mode=="document":
+                            self.progress(pid,"document","done",100,"转写、剪辑分析和图文文档已完成；未导出视频")
+                            batch_label="生成文档"
                         self.status(pid,"ready","批量"+batch_label+"完成")
                         batch["completed"]+=1
                     except services.OperationCancelled:
                         if action in ACTIONS:
                             self.progress(pid,action,"stopped",None,"已停止")
+                        if mode=="document":
+                            self.progress(pid,"document","stopped",None,"文档流程已停止")
                         self.status(pid,"stopped","批量处理已停止")
                         stopped=True
                         batch.update(status="stopped",step=(
@@ -1169,7 +1297,9 @@ class Workbench:
                     except Exception as exc:
                         if action in ACTIONS:
                             self.progress(pid,action,"error",None,"失败："+str(exc)[:120])
-                        self.status(pid,"error","批量"+mode+"失败",str(exc)[:1500])
+                        if mode=="document":
+                            self.progress(pid,"document","error",None,"文档流程失败："+str(exc)[:120])
+                        self.status(pid,"error","批量文档生成失败" if mode=="document" else "批量"+mode+"失败",str(exc)[:1500])
                         batch["failed"]+=1
                     try:
                         project=self.read(pid,"project.json")
@@ -1191,6 +1321,7 @@ class Workbench:
                         self.end_operation(active_pid)
                     else:
                         self.cancel_event.clear()
+                        self.task_resume_event.set()
                         self.active_pid=None
                         self.active_operation=None
                     self.active_batch_id=None
@@ -1198,13 +1329,16 @@ class Workbench:
                 finally:
                     self.busy.release()
         threading.Thread(target=target,daemon=True).start()
-    def launch_all(self,pid):
+    def launch_all(self,pid,mode="finish_all"):
+        if mode not in ("finish_all","document"): raise ValueError("完整处理流程无效")
         if not self.busy.acquire(blocking=False): raise RuntimeError("另一任务正在运行，请稍后")
-        try: self.status(pid,"running","一键处理中")
+        try:
+            self.status(pid,"running","文档处理中" if mode=="document" else "一键处理中")
+            if mode=="document": self.progress(pid,"document","running",0,"转写、分析并整理文档")
         except Exception:
             self.busy.release()
             raise
-        try: self.begin_operation(pid,"finish_all")
+        try: self.begin_operation(pid,mode)
         except Exception:
             self.busy.release()
             raise
@@ -1216,7 +1350,8 @@ class Workbench:
                 if has_segments: self.progress(pid,"transcribe","done",100,"已有字幕，跳过转写")
                 # One-click must use the currently selected editing model. Existing
                 # suggestions have no model/transcript fingerprint, so they may be stale.
-                actions=(["transcribe"] if not has_segments else [])+["analyze","summary","export"]
+                actions=(["transcribe"] if not has_segments else [])+["analyze","summary"]
+                if mode=="finish_all": actions.append("export")
                 for action in actions:
                     self.check_cancelled()
                     # Transcription already performs one automatic layout attempt.
@@ -1244,15 +1379,22 @@ class Workbench:
                     if action=="transcribe":
                         self.ensure_transcript_layout(pid)
                     self.check_cancelled()
+                    if action=="summary": self.cleanup_temporary_files(pid)
                     label=self.completion_label(pid,action)
                     self.progress(pid,action,"done",100,label)
-                self.status(pid,"ready","一键处理完成")
+                if mode=="document":
+                    self.progress(pid,"document","done",100,"转写、剪辑分析和图文文档已完成；未导出视频")
+                    self.status(pid,"ready","文档生成完成（未导出视频）")
+                else:
+                    self.status(pid,"ready","一键处理完成")
             except services.OperationCancelled:
                 if action in ACTIONS: self.progress(pid,action,"stopped",None,"已停止")
+                if mode=="document": self.progress(pid,"document","stopped",None,"文档流程已停止")
                 self.status(pid,"stopped","已由用户停止")
             except Exception as exc:
                 if action in ACTIONS: self.progress(pid,action,"error",None,"失败："+str(exc)[:120])
-                self.status(pid,"error","一键处理失败",str(exc)[:1500])
+                if mode=="document": self.progress(pid,"document","error",None,"文档流程失败："+str(exc)[:120])
+                self.status(pid,"error","文档生成失败" if mode=="document" else "一键处理失败",str(exc)[:1500])
             finally:
                 try: self.finish_model_session(pid)
                 finally:
@@ -1284,9 +1426,10 @@ class Workbench:
         target=self.folder(pid)/self.output_names(pid)["full_markdown"]
         target.write_text("\n".join(markdown).rstrip()+"\n",encoding="utf-8")
         self.deliver_artifact(pid,"full_markdown")
-        self.progress(pid,"document","running" if update_progress else "done",100,"无时间戳完整 Markdown 文档已生成")
+        if update_progress:
+            self.progress(pid,"document","done",100,"无时间戳完整 Markdown 文档已生成")
     def task_timestamp_document(self,pid):
-        """Generate a separate, paragraph-aligned timestamped transcript Markdown."""
+        """Generate a complete timestamped transcript from existing subtitles."""
         segments=self.read(pid,"segments.json",[])
         if not segments: raise RuntimeError("请先转写音频或导入字幕，再生成时间戳文档")
         paragraphs=transcript_paragraphs(segments,layout=self.read(pid,"transcript_layout.json"))
@@ -1304,7 +1447,9 @@ class Workbench:
         target=self.folder(pid)/self.output_names(pid)["timestamp_markdown"]
         target.write_text("\n".join(markdown).rstrip()+"\n",encoding="utf-8")
         self.deliver_artifact(pid,"timestamp_markdown")
-        self.progress(pid,"timestamp_document","running",100,"时间戳 Markdown 文档已生成")
+        self.render_full_transcript_html(pid,segments,self.media(pid))
+        self.deliver_artifact(pid,"full_html")
+        self.progress(pid,"timestamp_document","running",100,"时间戳 Markdown 与全文 HTML 已生成")
     def deliver_artifact(self,pid,key):
         """Copy completed artifacts into the configured video or document output tree."""
         names=self.output_names(pid)
@@ -1322,22 +1467,25 @@ class Workbench:
             destination_dir=output_root/group_name if group_output else output_root
             self._copy_delivered_file(pid,key,source,destination_dir,output_root,manifest)
         else:
-            configured=str(self.settings.get("notes_output_dir") or "").strip()
-            if not configured: return
-            output_root=Path(configured).expanduser().resolve()
             group_name,group_output=self._batch_output_group(pid)
-            generated=sum((self.folder(pid)/names[item]).is_file() for item in DOCUMENT_ARTIFACT_KEYS)
-            if group_output:
-                destination_dir=output_root/group_name
-            elif generated>=2:
-                project=self.read(pid,"project.json")
-                destination_dir=output_root/safe_name(Path(project.get("name","视频")).stem)
-            else:
-                destination_dir=output_root
             for artifact_key in DOCUMENT_ARTIFACT_KEYS:
                 artifact_source=self.folder(pid)/names[artifact_key]
-                if artifact_source.is_file():
-                    self._copy_delivered_file(pid,artifact_key,artifact_source,destination_dir,output_root,manifest)
+                if not artifact_source.is_file(): continue
+                is_html=artifact_key in ("html","full_html")
+                folder_setting="html_output_dir" if is_html else "notes_output_dir"
+                artifact_output=str(self.settings.get(folder_setting) or "").strip()
+                if not artifact_output: continue
+                output_root=Path(artifact_output).expanduser().resolve()
+                artifact_group=("html","full_html") if is_html else tuple(item for item in DOCUMENT_ARTIFACT_KEYS if item not in ("html","full_html"))
+                generated=sum((self.folder(pid)/names[item]).is_file() for item in artifact_group)
+                if group_output:
+                    destination_dir=output_root/group_name
+                elif generated>=2:
+                    project=self.read(pid,"project.json")
+                    destination_dir=output_root/safe_name(Path(project.get("name","视频")).stem)
+                else:
+                    destination_dir=output_root
+                self._copy_delivered_file(pid,artifact_key,artifact_source,destination_dir,output_root,manifest)
         self.write(pid,".delivered-artifacts.json",manifest)
     def _batch_output_group(self,pid):
         project=self.read(pid,"project.json")
@@ -1438,11 +1586,11 @@ class Workbench:
         folder=self.folder(pid); audio=folder/"audio.wav"
         self.status(pid,"running","提取音频")
         self.progress(pid,"transcribe","running",None,"正在提取音频")
-        if not audio.exists(): services.extract_audio(self.settings["ffmpeg"],self.source(pid),audio,self.cancel_event)
+        if not audio.exists(): services.extract_audio(self.settings["ffmpeg"],self.source(pid),audio,self.task_control)
         self.check_cancelled()
         self.status(pid,"running","运行外部 ASR")
         self.progress(pid,"transcribe","running",None,"语音识别中")
-        result=services.run_asr(self.settings["asr_command"],audio,folder/"asr.json",self.cancel_event,
+        result=services.run_asr(self.settings["asr_command"],audio,folder/"asr.json",self.task_control,
             {"asr_model":self.settings.get("qwen3_asr_model",""),
              "asr_aligner":self.settings.get("qwen3_aligner_model","")})
         self.check_cancelled()
@@ -1632,7 +1780,7 @@ class Workbench:
         project["updated"]=project["reviewed_at"]
         self.write(pid,"project.json",project)
         self.progress(pid,"export","pending",0,"已恢复选中文字，等待导出")
-        return {"ok":True}
+        return {"ok":True,"suggestions":updated}
     def add_pause_suggestion(self,pid,start,end):
         start,end=float(start),float(end)
         segments=self.read(pid,"segments.json",[])
@@ -1715,7 +1863,7 @@ class Workbench:
                               source_bitrate=media.get("video_bitrate"),
                               source_duration=media.get("duration"),
                               encoder=encoder,
-                              resolution=resolution,cancel_event=self.cancel_event,
+                              resolution=resolution,cancel_event=self.task_control,
                               subtitle_path=subtitle_path)
         self.check_cancelled()
         self.deliver_artifact(pid,"subtitle")
@@ -1751,7 +1899,12 @@ class Workbench:
         except services.OperationCancelled:
             raise
         except Exception as exc:
-            self.render_transcript_article(pid,segments,media,fallback_reason=str(exc),
+            detail=str(exc)
+            if isinstance(exc,ValueError) or "无效 JSON" in detail or "无效格式" in detail:
+                reason="模型返回内容格式异常"
+            else:
+                reason="图文总结未能生成可用章节内容"
+            self.render_transcript_article(pid,segments,media,fallback_reason=reason,
                                            include_html=include_html,progress_action=progress_action,
                                            summary_mode=summary_mode)
         self.deliver_artifact(pid,"markdown")
@@ -1774,50 +1927,73 @@ class Workbench:
             self.check_cancelled()
             self.status(pid,"running","外部场景检测")
             target=self.folder(pid)/"scenes.json"
-            data=services.external_json(cfg["scene_command"],{"video":str(self.source(pid)),"output":str(target)},target,14400,self.cancel_event)
+            data=services.external_json(cfg["scene_command"],{"video":str(self.source(pid)),"output":str(target)},target,14400,self.task_control)
             raw=data.get("times",[]) if isinstance(data,dict) else []
             scene_times=sorted(float(x) for x in raw if isinstance(x,(int,float)) and 0<=x<media["duration"])
         paragraphs=transcript_paragraphs(segments,layout=self.read(pid,"transcript_layout.json"))
         if not paragraphs: raise RuntimeError("没有可总结的字幕")
         batches=paragraph_batches(paragraphs); topic_chapters=[]
-        for batch_index,batch in enumerate(batches):
-            self.check_cancelled()
-            self.status(pid,"running",f"识别字幕主题 {batch_index+1}/{len(batches)}")
+
+        def summarize_batch(batch,split_depth=0):
             lines="\n".join(f"[{row['id']}] {row['start']:.2f}-{row['end']:.2f} 秒：{row['text']}" for row in batch)
             prompt=("你是严谨的中文内容编辑。请依据字幕段落本身，把连续段落按实际主题划分章节；"
                 "不要按固定分钟数切章，同一主题应合并，主题变化时才另起一章。每条段落必须且只能属于一个章节，"
                 "按原顺序完整覆盖。标题直接写具体主题，不要写视频强调、视频开场确认、视频讲解了、视频分析了等套话，"
                 "摘要直接说明内容和结论，不以‘视频’或‘本视频’作主语，不写开场白。不要补造信息。"
-                "每章返回 start_id、end_id、title、summary、bullets、visual_id、visual_description。"
+                "涉及公司、市场或投资分析时，摘要按‘分析对象—字幕依据—讲者解释—结论’说明逻辑；保留主体、时间范围、买卖方向、数字、比例、仓位和前后轮次对比。"
+                "讲者当场修正数字或说法时，采用修正后的口径；若修正影响理解，要简短注明修正。区分已发生事实与讲者判断，保留‘可能’‘应该’等不确定措辞，不把相关关系改写成字幕未支持的因果关系。"
+                "章节末尾补充的分析结论也必须纳入摘要或要点，不要只总结前半段背景。"
+                "每章还要单独提炼 viewpoint：只写讲者明确表达的观点、判断或建议，不复述背景事实，不替讲者添加结论；若本章没有明确观点则返回空字符串。"
+                "每章返回 start_id、end_id、title、summary、viewpoint、bullets、visual_id、visual_description。"
                 "visual_id 从本章段落 ID 中选一个确实适合配图的段落；visual_description 是可供画面检索的具体中文描述，"
                 "优先选择字幕提到的图表、数字、物品、人物动作、屏幕演示或场景；无法从内容推断具体画面时，visual_id 设为 null、描述留空。"
                 "只返回 JSON：{\"chapters\":[{\"start_id\":\"p000001\",\"end_id\":\"p000003\","
-                "\"title\":\"主题\",\"summary\":\"摘要\",\"bullets\":[\"要点\"],"
+                "\"title\":\"主题\",\"summary\":\"摘要\",\"viewpoint\":\"讲者观点或结论；无明确观点时为空字符串\",\"bullets\":[\"要点\"],"
                 "\"visual_id\":\"p000002\",\"visual_description\":\"画面检索描述\"}]}\n"
                 +SUMMARY_MODES[summary_mode]+"\n字幕段落：\n"+lines)
-            result=self.model_chat_role("summary",[{"role":"user","content":prompt}],5000,
-                                 chat_template_kwargs={"enable_thinking":False})
-            data=parse_json_object(result)
-            try: grouped=chapters_from_ranges(data.get("chapters"),batch)
-            except ValueError as exc:
-                retry=self.model_chat_role("summary",[{"role":"user","content":prompt+
-                    f"\n上次返回的范围无效（{exc}）。请重新返回，必须从 {batch[0]['id']} 开始到 {batch[-1]['id']} 结束，连续覆盖且不得遗漏。"}],5000,
-                    chat_template_kwargs={"enable_thinking":False})
-                grouped=chapters_from_ranges(parse_json_object(retry).get("chapters"),batch)
+            last_error=None
+            for attempt in range(2):
+                request_prompt=prompt
+                if attempt:
+                    self.status(pid,"running",f"章节 JSON 格式异常，正在重试（{len(batch)} 段字幕）")
+                    request_prompt+=("\n上次响应无法解析或范围不完整。请重新返回一个完整、有效的 JSON 对象，不要使用 Markdown；"
+                        "字符串中的双引号必须转义，数组和对象末尾不要留逗号。请从头到尾完整覆盖以下段落，"
+                        "每章最多 3 条要点，每条要点不超过 40 字，摘要不超过 180 字，画面描述不超过 80 字。"
+                        f"段落范围必须从 {batch[0]['id']} 到 {batch[-1]['id']}。")
+                result=self.model_chat_role("summary",[{"role":"user","content":request_prompt}],5000,
+                                     chat_template_kwargs={"enable_thinking":False})
+                try:
+                    data=parse_json_object(result)
+                    return chapters_from_ranges(data.get("chapters"),batch)
+                except ValueError as exc:
+                    last_error=exc
+            if len(batch)>1 and split_depth<2:
+                midpoint=len(batch)//2
+                self.status(pid,"running",f"模型 JSON 连续无效，自动拆分字幕批次（{len(batch)} 段）")
+                return summarize_batch(batch[:midpoint],split_depth+1)+summarize_batch(batch[midpoint:],split_depth+1)
+            raise RuntimeError("章节总结模型连续两次返回无效 JSON："+str(last_error)[:240]) from last_error
+
+        for batch_index,batch in enumerate(batches):
+            self.check_cancelled()
+            self.status(pid,"running",f"识别字幕主题 {batch_index+1}/{len(batches)}")
+            grouped=summarize_batch(batch)
             topic_chapters.extend(grouped)
             self.progress(pid,progress_action,"running",round((batch_index+1)/len(batches)*30),
                           f"已整理 {batch_index+1}/{len(batches)} 组字幕主题")
         chapters=topic_chapters
         if len(topic_chapters)>1:
             self.status(pid,"running","合并相邻的同主题段落")
-            outline="\n".join(f"{i+1}. {chapter['start_id']}—{chapter['end_id']}｜{chapter['title']}｜{chapter['summary'][:220]}｜画面线索 {chapter['visual_description']}"
+            outline="\n".join(f"{i+1}. {chapter['start_id']}—{chapter['end_id']}｜{chapter['title']}｜摘要 {chapter['summary'][:220]}｜讲者观点 {chapter['viewpoint'][:160]}｜画面线索 {chapter['visual_description']}"
                                for i,chapter in enumerate(topic_chapters))
             prompt=("请整理以下按时间顺序排列的主题章节。只把相邻且实际属于同一主题的章节合并；"
                 "不同主题保持分开，不按时间长度合并。所有来源段落必须连续、完整、无重叠地覆盖。"
                 "为合并后的章节给出具体标题、精炼摘要、最多 5 条要点，并从对应主题的来源段落中挑一个最适合配图的 visual_id 和具体 visual_description。"
+                "摘要须保留分析对象、关键字幕依据、讲者解释和结论；涉及公司、市场或投资时，保留主体、时间范围、买卖方向、数字、比例、仓位及前后轮次对比。"
+                "讲者自我修正时采用修正后的口径；区分已发生事实与判断，保留不确定措辞；不要把相关关系升级成字幕未支持的因果关系。章节末尾补充的分析结论不能遗漏。"
+                "另用 viewpoint 单独提炼讲者明确表达的观点、判断或建议；不复述背景事实、不添加讲者没说的观点，无明确观点时返回空字符串。"
                 "避免模板句，不要出现‘视频强调’‘视频开场确认’‘视频讲解了’‘视频分析了’等表述。"
                 "返回 JSON：{\"chapters\":[{\"start_id\":\"p000001\",\"end_id\":\"p000006\","
-                "\"title\":\"主题\",\"summary\":\"摘要\",\"bullets\":[\"要点\"],"
+                "\"title\":\"主题\",\"summary\":\"摘要\",\"viewpoint\":\"讲者观点或结论；无明确观点时为空字符串\",\"bullets\":[\"要点\"],"
                 "\"visual_id\":\"p000003\",\"visual_description\":\"画面检索描述\"}]}\n"
                 +SUMMARY_MODES[summary_mode]+"\n章节清单：\n"+outline)
             try:
@@ -1863,9 +2039,9 @@ class Workbench:
                     preview_path=None
                     if needs_vision:
                         preview_path=self.folder(pid)/f".frame_preview_{index:03d}_{candidate_index}.jpg"
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,preview_path,self.cancel_event)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,preview_path,self.task_control)
                     elif candidate_index==0:
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.cancel_event,max_width=None)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.task_control,max_width=None)
                     candidate_paths.append((picture,path,second,preview_path))
                 selected_index=0
                 if is_title_page:
@@ -1901,18 +2077,19 @@ class Workbench:
                 if selected_index>=0:
                     picture,path,second,preview_path=candidate_paths[selected_index]
                     if preview_path:
-                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.cancel_event,max_width=None)
+                        services.frame(cfg["ffmpeg"],self.source(pid),second,path,self.task_control,max_width=None)
                     pictures=[picture]
                     if cfg["ocr_command"]:
                         self.check_cancelled()
                         ocr_path=self.folder(pid)/f"ocr_topic_{index:03d}.json"
-                        data=services.external_json(cfg["ocr_command"],{"image":str(path),"output":str(ocr_path)},ocr_path,120,self.cancel_event)
+                        data=services.external_json(cfg["ocr_command"],{"image":str(path),"output":str(ocr_path)},ocr_path,120,self.task_control)
                         if isinstance(data,dict) and data.get("text"): ocr=str(data["text"])[:1200]
                 for candidate_index,(_,path,_,preview_path) in enumerate(candidate_paths):
                     if candidate_index!=selected_index: path.unlink(missing_ok=True)
                     if preview_path: preview_path.unlink(missing_ok=True)
             stored={"start":chapter["start"],"end":chapter["end"],"title":clean_summary_text(chapter["title"],120),
-                "summary":clean_summary_text(chapter["summary"]),"bullets":[clean_summary_text(x,500) for x in chapter["bullets"][:8]],
+                "summary":clean_summary_text(chapter["summary"]),"viewpoint":clean_summary_text(chapter.get("viewpoint",""),500),
+                "bullets":[clean_summary_text(x,500) for x in chapter["bullets"][:8]],
                 "picture":pictures[0] if pictures else None,"pictures":pictures,"visual":clean_summary_text(visual,500),"ocr":ocr}
             completed.append(stored)
             self.write(pid,"summary.json",{"chapters":completed,"complete":False})
@@ -1943,7 +2120,7 @@ class Workbench:
         return defaults
     def document_css(self):
         theme=self.document_theme(); colors=theme["colors"]
-        return ("*{box-sizing:border-box}html{color-scheme:dark;scroll-behavior:smooth}"
+        return ("*{box-sizing:border-box}html{color-scheme:dark;scroll-behavior:smooth;scroll-padding-top:76px}"
             f"body{{margin:0;background:{colors['background']};color:{colors['text']};font:16px/1.8 {theme['font_stack']}}}"
             f".page{{max-width:{theme['content_width']};margin:0 auto;padding:{theme['page_padding']} 24px 80px}}"
             f".hero{{padding:42px 46px;border:1px solid {colors['border']};border-radius:28px;"
@@ -1958,15 +2135,32 @@ class Workbench:
             f"nav{{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0}}"
             f"nav a{{display:inline-block;padding:7px 12px;border:1px solid {colors['border']};border-radius:999px;"
             f"color:{colors['accent']};text-decoration:none;font-size:13px;line-height:1.4}}"
+            f".chapter-dock{{position:fixed;top:0;left:50%;z-index:20;max-width:calc(100vw - 24px);transform:translateX(-50%);"
+            f"color:{colors['muted']};font-size:13px}}.chapter-dock>summary{{list-style:none;cursor:pointer;margin:0 auto;"
+            f"padding:4px 16px 6px;border:1px solid {colors['border']};border-top:0;border-radius:0 0 999px 999px;"
+            f"background:{colors['surface']};box-shadow:0 8px 24px #0005;opacity:.48;transition:opacity .18s}}"
+            ".chapter-dock>summary::-webkit-details-marker{display:none}"
+            ".chapter-dock:hover>summary,.chapter-dock[open]>summary,.chapter-dock:focus-within>summary{opacity:1}"
+            f".chapter-dock>nav{{display:none;max-height:65vh;overflow:auto;flex-wrap:wrap;justify-content:center;gap:8px;"
+            f"width:min(1000px,calc(100vw - 24px));margin:0 auto;padding:14px;border:1px solid {colors['border']};"
+            f"border-radius:0 0 18px 18px;background:{colors['surface']};box-shadow:0 18px 50px #0009}}"
+            ".chapter-dock:hover>nav,.chapter-dock[open]>nav,.chapter-dock:focus-within>nav{display:flex}"
+            ".chapter-dock>nav a{max-width:100%;overflow-wrap:anywhere}"
             f".card,.article-body{{margin:16px 0;padding:26px 30px;border:1px solid {colors['border']};"
             f"border-radius:22px;background:{colors['surface']};box-shadow:0 12px 40px #0003}}"
             f".time{{display:inline-block;margin-bottom:10px;color:{colors['accent']};font-size:12px;"
             f"font-weight:700;letter-spacing:.04em}}.summary{{font-size:17px}}"
+            f".viewpoint{{margin:14px 0;padding:14px 18px;border-left:3px solid {colors['accent']};"
+            f"border-radius:8px;background:{colors['note']}}}"
             f".card ul{{padding-left:1.25em;color:{colors['text']}}}.card li{{padding:3px 0}}"
             f"img{{display:block;width:100%;height:auto;margin:18px 0;border:1px solid {colors['border']};"
             f"border-radius:16px}}.caption{{font-size:13px}}"
-            f".transcript{{margin:0;padding:17px 0;border-bottom:1px solid {colors['border']}}}"
-            ".transcript:last-child{border-bottom:0}.transcript .time{display:block;margin:0 0 5px}"
+            f".transcript{{display:grid;grid-template-columns:minmax(112px,auto) 1fr;align-items:start;gap:16px;"
+            f"margin:10px 0;padding:16px 18px;border:1px solid {colors['border']};border-radius:15px;"
+            f"background:linear-gradient(145deg,{colors['raised']},{colors['surface']})}}"
+            f".transcript .time{{display:inline-block;align-self:start;margin:0;padding:4px 9px;"
+            f"border:1px solid {colors['border']};border-radius:999px;background:{colors['note']};"
+            f"color:{colors['accent']};font-size:12px;font-weight:700;letter-spacing:.035em;white-space:nowrap}}"
             ".transcript .text{display:block;white-space:pre-wrap;overflow-wrap:anywhere}"
             ".transcript mark{padding:0 .1em;border-radius:4px;color:inherit;-webkit-box-decoration-break:clone;box-decoration-break:clone}"
             ".deleted-filler{background:#674c2e;color:#ffe7bc}.deleted-repeat{background:#633943;color:#ffd7df}"
@@ -1974,7 +2168,9 @@ class Workbench:
             ".deleted-other{background:#5c542d;color:#fff0a8}.deletion-legend{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 22px}"
             ".deletion-legend span{padding:3px 9px;border-radius:999px;font-size:12px}"
             f"footer{{padding:24px 4px;font-size:12px}}::selection{{background:{colors['accent']}55}}"
-            "@media(max-width:640px){.page{padding:18px 12px 42px}.hero,.card,.article-body{padding:23px 19px;border-radius:18px}h1{font-size:17px}}")
+            "@media(max-width:640px){.page{padding:18px 12px 42px}.hero,.card,.article-body{padding:23px 19px;border-radius:18px}"
+            ".chapter-dock>summary{opacity:.78}.chapter-dock>nav{max-height:55vh;padding:11px}"
+            ".transcript{grid-template-columns:1fr;gap:6px;padding:13px 14px}.transcript .time{justify-self:start}h1{font-size:17px}}")
     def render_full_transcript_html(self,pid,segments,media):
         layout=self.read(pid,"transcript_layout.json")
         suggestions=self.read(pid,"suggestions.json",[])
@@ -2052,8 +2248,9 @@ class Workbench:
             f'<header class="hero"><div class="eyebrow">语音转写 · 无模型排版</div>'
             f'<h1>{escaped_title}</h1><div class="meta">来源：{escaped_source}　·　'
             f'{clock(duration)}　·　{len(paragraphs):,} 段　·　{character_count:,} 字</div></header>'
-            f'<aside class="note">本文按语音识别字幕整理，并附有原视频时间范围。未配置文本模型，'
-            f'因此不包含主题归纳、摘要或配图说明；识别文字未经模型校对。</aside>'
+            f'<aside class="note">本文按语音识别字幕整理，并附有原视频时间范围。'
+            f'{"模型未返回可用章节内容，因此未包含主题归纳、摘要或配图说明；" if fallback_reason else "未配置文本模型，因此未包含主题归纳、摘要或配图说明；"}'
+            f'识别文字未经模型校对。</aside>'
             f'<section class="article-body"><h2>转写正文</h2>{"".join(html_paragraphs)}</section>'
             f'<footer>由 Video Workbench 根据字幕自动排版 · 原始语音识别内容</footer>'
             f'</main></body></html>')
@@ -2064,8 +2261,8 @@ class Workbench:
             "fallback_reason":str(fallback_reason)[:500] if fallback_reason else "",
             "html_generated":bool(include_html)})
         if fallback_reason:
-            label=("模型服务不可用，已回退生成字幕版 Markdown 与 HTML" if include_html
-                   else "模型服务不可用，已回退生成字幕版总结 Markdown")
+            label=("已生成字幕版 Markdown 与 HTML（模型未返回可用章节内容）" if include_html
+                   else "已生成字幕版总结 Markdown（模型未返回可用章节内容）")
         else:
             label=("未配置文本模型，已生成字幕排版版 Markdown 与 HTML" if include_html
                    else "未配置文本模型，已生成字幕版总结 Markdown")
@@ -2081,6 +2278,9 @@ class Workbench:
         clock=lambda value:f"{int(value//3600):02d}:{int(value//60)%60:02d}:{int(value)%60:02d}"
         for i,c in enumerate(chapters):
             points="".join(f"<li>{esc(clean_summary_text(p,500))}</li>" for p in c["bullets"])
+            viewpoint=clean_summary_text(c.get("viewpoint",""),500)
+            viewpoint_block=(f'<aside class="viewpoint"><strong>讲者观点：</strong>{esc(viewpoint)}</aside>'
+                             if viewpoint else "")
             images=[]
             if include_images:
                 for picture in c.get("pictures") or ([c["picture"]] if c.get("picture") else []):
@@ -2091,14 +2291,16 @@ class Workbench:
             ocr=esc(clean_summary_text(c.get("ocr",""),1200)) if include_image_notes else ""
             notes=(f'<p class="caption">{caption}{" · " if caption and ocr else ""}{ocr}</p>'
                    if caption or ocr else "")
-            cards.append(f'<article class="card" id="c{i}"><small class="time">{clock(c["start"])} — {clock(c["end"])}</small><h2>{esc(clean_summary_text(c["title"],120))}</h2><p class="summary">{esc(clean_summary_text(c["summary"]))}</p><ul>{points}</ul>{image}{notes}</article>')
+            cards.append(f'<article class="card" id="c{i}"><small class="time">{clock(c["start"])} — {clock(c["end"])}</small><h2>{esc(clean_summary_text(c["title"],120))}</h2><p class="summary">{esc(clean_summary_text(c["summary"]))}</p>{viewpoint_block}<ul>{points}</ul>{image}{notes}</article>')
         mode_label={"detailed":"详细","concise":"简约","medium":"中档"}.get(summary_mode,"详细")
+        floating_nav=(f'<details class="chapter-dock"><summary>章节导航</summary>'
+                      f'<nav aria-label="悬浮章节目录">{nav}</nav></details>')
         doc=(f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title} · 图文总结</title>'
             f'<style>{self.document_css()}</style></head><body><main class="page">'
             f'<header class="hero"><h1>{title}</h1><div class="meta">图文总结 · {mode_label}模式 · 来源：{source_label}</div></header>'
             f'<nav aria-label="章节目录">{nav}</nav>{"".join(cards)}'
-            '<footer>由 Video Workbench 根据字幕与可用画面生成</footer></main></body></html>')
+            f'<footer>由 Video Workbench 根据字幕与可用画面生成</footer></main>{floating_nav}</body></html>')
         if include_html:
             (self.folder(pid)/self.output_names(pid)["html"]).write_text(doc,encoding="utf-8")
         markdown=[f"# {source_title}_smart", "", "> 图文总结笔记", "",
@@ -2109,6 +2311,8 @@ class Workbench:
             markdown.extend([f"## {index:02d} · {clean_summary_text(chapter.get('title','相关主题'),120)}", ""])
             summary=clean_summary_text(chapter.get("summary",""))
             if summary: markdown.extend([summary, ""])
+            viewpoint=clean_summary_text(chapter.get("viewpoint",""),500)
+            if viewpoint: markdown.extend([f"**讲者观点：**{viewpoint}", ""])
             for point in chapter.get("bullets",[]):
                 point=clean_summary_text(point,500)
                 if point: markdown.append(f"- {point}")

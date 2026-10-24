@@ -1,6 +1,21 @@
 from __future__ import annotations
 import html, json, re, unicodedata
 
+def _loads_json_repairing_escapes(text):
+    """Parse model JSON while preserving literal backslashes in returned text."""
+    repaired=text
+    repairs=0
+    while True:
+        try:
+            return json.loads(repaired,strict=False)
+        except json.JSONDecodeError as exc:
+            if exc.msg not in ("Invalid \\escape", "Invalid \\uXXXX escape"):
+                raise
+            if exc.pos>=len(repaired) or repaired[exc.pos]!="\\" or repairs>=10000:
+                raise
+            repaired=repaired[:exc.pos]+"\\"+repaired[exc.pos:]
+            repairs+=1
+
 def parse_json_object(value):
     if not isinstance(value,str) or not value.strip():
         raise ValueError("模型未返回文本内容，无法解析 JSON")
@@ -8,8 +23,7 @@ def parse_json_object(value):
     if value.startswith(chr(96)*3):
         value=re.sub(r"^.{3}(?:json)?\s*|\s*.{3}$","",value,flags=re.I)
     def loads(text):
-        try: return json.loads(text)
-        except json.JSONDecodeError: return json.loads(text,strict=False)
+        return _loads_json_repairing_escapes(text)
     try: result=loads(value)
     except json.JSONDecodeError:
         a,b=value.find("{"),value.rfind("}")
