@@ -264,12 +264,15 @@ def normalize_bilibili_cookie_file(value):
     kept=[header]; has_sessdata=False
     for line in lines[1:]:
         if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")): continue
-        cookie_line=line[len("#HttpOnly_"):] if line.startswith("#HttpOnly_") else line
+        is_httponly=line.startswith("#HttpOnly_")
+        cookie_line=line[len("#HttpOnly_"):] if is_httponly else line
         fields=cookie_line.split("\t")
         if len(fields)!=7: raise ValueError("Cookie 文件格式无效，请重新导出 Netscape 格式 cookies.txt")
         domain=fields[0].lstrip(".").lower()
         if domain!="bilibili.com" and not domain.endswith(".bilibili.com"): continue
-        kept.append(line)
+        # Netscape requires the leading dot and include-subdomains flag to agree.
+        fields[1]="TRUE" if fields[0].startswith(".") else "FALSE"
+        kept.append(("#HttpOnly_" if is_httponly else "")+"\t".join(fields))
         if fields[5]=="SESSDATA" and fields[6]: has_sessdata=True
     if not has_sessdata:
         raise ValueError("Cookie 文件中没有找到 B 站 SESSDATA 登录信息，请先在浏览器登录 B 站后重新导出")
@@ -355,7 +358,7 @@ def bilibili_qr_login_poll(login):
         if normalized!="bilibili.com" and not normalized.endswith(".bilibili.com"):
             continue
         domain_field=("#HttpOnly_" if cookie.has_nonstandard_attr("HttpOnly") else "")+domain
-        fields=(domain_field,"TRUE" if cookie.domain_initial_dot else "FALSE",cookie.path or "/",
+        fields=(domain_field,"TRUE" if domain.startswith(".") else "FALSE",cookie.path or "/",
                 "TRUE" if cookie.secure else "FALSE",str(cookie.expires or 0),cookie.name,cookie.value)
         rows.append("\t".join(fields))
     try:
@@ -364,7 +367,7 @@ def bilibili_qr_login_poll(login):
         raise RuntimeError("B 站已确认扫码，但没有收到有效登录 Cookie，请重新扫码") from exc
     return {"status":"success","cookies":cookie_file}
 
-def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
+def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None,progress_callback=None):
     """Download one Bilibili video and available captions using yt-dlp."""
     try:
         from yt_dlp import YoutubeDL
@@ -372,10 +375,37 @@ def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
         raise RuntimeError("B 站链接导入需要 yt-dlp。请在工作台 Python 环境执行：python -m pip install yt-dlp") from exc
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=False)
+    def report_progress(status, downloaded_bytes=None, total_bytes=None, speed=None, eta=None, message=""):
+        if not progress_callback: return
+        percent=None
+        if total_bytes and downloaded_bytes is not None:
+            percent=max(0,min(100,downloaded_bytes*100/total_bytes))
+        try:
+            progress_callback({"phase":status,"percent":percent,"downloaded_bytes":downloaded_bytes,
+                               "total_bytes":total_bytes,"speed":speed,"eta":eta,"message":message})
+        except Exception:
+            # Progress reporting must never interrupt the download itself.
+            pass
+    def progress_hook(data):
+        status=data.get("status")
+        if status not in ("downloading","finished","error"): return
+        downloaded=data.get("downloaded_bytes")
+        total=data.get("total_bytes") or data.get("total_bytes_estimate")
+        if status=="downloading":
+            message="正在下载 B 站视频或字幕文件"
+        elif status=="finished":
+            message="当前文件下载完成，正在处理其他资源或合并视频"
+            downloaded=total or downloaded
+        else:
+            message="B 站视频文件下载失败"
+        report_progress(status,downloaded,total,data.get("speed"),data.get("eta"),message)
+
+    report_progress("preparing",message="正在获取 B 站视频信息…")
     options={"outtmpl":str(directory/"%(id)s.%(ext)s"),
              "format":"bestvideo*+bestaudio/best","merge_output_format":"mkv",
              "writesubtitles":True,"writeautomaticsub":True,"subtitleslangs":["all"],
              "subtitlesformat":"srt/vtt/best","noplaylist":True,"max_filesize":25*1024**3,
+             "progress_hooks":[progress_hook],"concurrent_fragment_downloads":8,
              "retries":3,"fragment_retries":3,"socket_timeout":30,"quiet":True,"no_warnings":True}
     if ffmpeg and ffmpeg!="ffmpeg": options["ffmpeg_location"]=ffmpeg
     if cookiefile: options["cookiefile"]=str(cookiefile)
@@ -404,6 +434,8 @@ def download_bilibili(url,directory,ffmpeg="ffmpeg",cookiefile=None):
                 "title":str(info.get("title") or info.get("id") or video.stem)}
     except Exception as exc:
         shutil.rmtree(directory,ignore_errors=True)
+        if "invalid Netscape format cookies file" in str(exc):
+            raise RuntimeError("下载 B 站视频失败：登录 Cookie 文件格式无效，请清除旧登录并重新扫码。") from None
         raise RuntimeError(f"下载 B 站视频失败：{exc}") from exc
 
 def stop_local_model(base,key,mode="gateway",timeout=240):
@@ -536,8 +568,8 @@ def run_asr(template,audio,target,cancel_event=None,substitutions=None):
         for key,replacement in replacements.items(): arg=arg.replace("{"+key+"}",str(replacement))
         argv.append(arg)
     target=Path(target)
-    argv[0]=executable(argv[0])
     target.unlink(missing_ok=True)
+    argv[0]=executable(argv[0])
     try:
         run(argv,14400,cancel_event)
     except OperationCancelled:

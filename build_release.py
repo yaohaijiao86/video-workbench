@@ -45,7 +45,7 @@ def source_files():
         if not path.is_file():
             continue
         relative = path.relative_to(PROJECT_ROOT)
-        if any(part in EXCLUDED_DIRECTORIES for part in relative.parts):
+        if any(part in EXCLUDED_DIRECTORIES or part.endswith(".egg-info") for part in relative.parts):
             continue
         if relative.as_posix() in EXCLUDED_FILES:
             continue
