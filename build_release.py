@@ -29,7 +29,6 @@ EXCLUDED_DIRECTORIES = {
 EXCLUDED_SUFFIXES = {".exe", ".log", ".pyc", ".rar", ".zip"}
 EXCLUDED_FILES = {
     "docs/development-architecture-deployment.html",
-    "docs/installation-migration-guide.html",
     "docs/video-workbench-guide.html",
     "docs/video-workbench-guide.md",
 }
