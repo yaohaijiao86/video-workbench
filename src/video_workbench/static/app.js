@@ -42,7 +42,7 @@ function saveUIState() {
   if (restoringUIState) return;
   try {
     localStorage.setItem(UI_STATE_KEY, JSON.stringify({
-      page: $("settings_page").hidden ? "workspace" : "settings",
+      page: !$("history_page").hidden ? "history" : $("settings_page").hidden ? "workspace" : "settings",
       projectId: current || "",
       batchId: currentBatch || $("batch_select").value || "",
       recentOpen: document.querySelector("details.recent")?.open === true,
@@ -199,6 +199,11 @@ function setBilibiliLoginStatus(configured) {
 }
 function applySettings(s, module = "") {
   const applies = (...names) => !module || names.includes(module);
+  if (applies("watch")) {
+    $("watch_folders").value = (s.watch_folders || []).join("\n");
+    const scan = s.auto_scan_last || {};
+    $("auto_scan_last").textContent = scan.checked_at ? "上次扫描：" + scan.checked_at + " · " + (scan.message || "") : "保存后立即扫描，此后每小时扫描";
+  }
   if (applies("html")) {
     $("html_output_dir").value = s.html_output_dir || "";
     $("html_include_images").checked = s.html_include_images !== "false";
@@ -253,6 +258,7 @@ function settingsModulePayload(module) {
   const stringFields = keys => keys.forEach(key => { result[key] = $(key).value.trim(); });
   const commandFields = keys => keys.forEach(key => { result[key] = JSON.parse($(key).value || "[]"); });
   if (module === "storage") stringFields(["output_mode","output_dir","video_output_dir","notes_output_dir"]);
+  else if (module === "watch") result.watch_folders = $("watch_folders").value.split(/\r?\n/).map(row => row.trim()).filter(Boolean);
   else if (module === "html") {
     result.html_output_dir = $("html_output_dir").value.trim();
     result.html_include_images = $("html_include_images").checked ? "true" : "false";
@@ -1199,13 +1205,24 @@ async function runSelectedTask(action) {
   const labels={document:"生成文档",timestamp_document:"生成时间戳文档",finish_all:"一键完成"};
   notice("已启动批量" + (labels[action] || action));
 }
-function showSettings(open, options = {}) {
-  $("workspace_page").hidden = open;
-  $("settings_page").hidden = !open;
-  $("open_settings").hidden = open;
+function showPage(page, options = {}) {
+  $("workspace_page").hidden = page !== "workspace";
+  $("settings_page").hidden = page !== "settings";
+  $("history_page").hidden = page !== "history";
+  $("open_settings").hidden = page === "settings";
+  $("open_history").hidden = page === "history";
   renderTaskControl();
   if (options.scroll !== false) window.scrollTo({top:0,behavior:"smooth"});
   if (options.persist !== false) saveUIState();
+}
+function showSettings(open, options = {}) { showPage(open ? "settings" : "workspace", options); }
+async function loadTaskHistory() {
+  const rows=await request("/api/task-history");
+  $("task_history_rows").innerHTML=rows.map(row => "<tr><td>" + safe(row.name) + "</td><td>" +
+    safe(({finish_all:"一键完成",document:"生成文档",prepare:"准备",export:"导出",summary:"总结",transcribe:"转写"})[row.mode] || row.mode) +
+    "</td><td>" + safe(({ready:"完成",error:"失败",stopped:"已停止"})[row.status] || row.status) +
+    "</td><td>" + safe(row.imported_at) + "</td><td>" + safe(row.ended_at) + "</td></tr>").join("");
+  $("task_history_empty").hidden=rows.length>0;
 }
 async function loadSession() {
   const session = await request("/api/session");
@@ -1239,8 +1256,9 @@ async function restoreUIState(saved) {
     $("detail").hidden = true;
   }
 
-  showSettings(requiredInitialSetup, {scroll:false,persist:false});
-  if (!requiredInitialSetup) {
+  showPage(requiredInitialSetup ? "settings" : saved?.page === "history" ? "history" : saved?.page === "settings" ? "settings" : "workspace", {scroll:false,persist:false});
+  if (!$("history_page").hidden) loadTaskHistory().catch(error => notice(error.message));
+  if (!requiredInitialSetup && $("workspace_page").hidden === false) {
     document.querySelector(".import-card")?.scrollIntoView({block:"start"});
   }
   restoringUIState = false;
@@ -1344,12 +1362,23 @@ $("clear_bilibili_cookies").onclick = async () => {
   finally { button.disabled = false; }
 };
 $("open_settings").onclick = () => showSettings(true);
+$("open_history").onclick = () => { showPage("history"); loadTaskHistory().catch(error => notice(error.message)); };
+$("close_history").onclick = () => showPage("workspace");
 $("pause_task").onclick = () => toggleTaskPause();
 $("logout").onclick = async () => {
   try { await request("/auth/logout", "POST", {}); }
   finally { window.location.replace("/"); }
 };
 $("close_settings").onclick = () => showSettings(false);
+$("pick_watch_folder").onclick = () => chooseFolder("watch_folder_candidate").catch(error => notice(error.message));
+$("add_watch_folder").onclick = () => {
+  const path=$("watch_folder_candidate").value.trim();
+  if (!path) return notice("请先选择或输入文件夹");
+  const rows=$("watch_folders").value.split(/\r?\n/).map(row => row.trim()).filter(Boolean);
+  if (!rows.includes(path)) rows.push(path);
+  $("watch_folders").value=rows.join("\n");
+  $("watch_folder_candidate").value="";
+};
 $("output_mode").onchange = updateOutputHint;
 $("video_resolution").onchange = syncVideoSettingsControls;
 $("video_bitrate_mbps").onchange = syncVideoSettingsControls;
@@ -1581,4 +1610,5 @@ setInterval(() => {
   loadProjects().catch(() => {});
   loadBatches().catch(() => {});
   loadTaskControl().catch(() => {});
+  if (!$("history_page").hidden) loadTaskHistory().catch(() => {});
 },4000);

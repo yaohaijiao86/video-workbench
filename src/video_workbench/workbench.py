@@ -18,7 +18,7 @@ DEFAULTS={"ffmpeg":"ffmpeg","ffprobe":"ffprobe","asr_command":ASR_DEFAULT_COMMAN
           "output_mode":"data","output_dir":"","video_output_dir":"","notes_output_dir":"","html_output_dir":"","video_container":"source","video_fps":"source",
           "video_resolution":"source","video_resolution_width":"1920","video_resolution_height":"1080",
           "video_bitrate_mbps":"source","video_bitrate_custom_mbps":"5","video_encoder":"h264_nvenc",
-          "html_include_images":"true","html_include_image_notes":"true"}
+          "html_include_images":"true","html_include_image_notes":"true","watch_folders":[]}
 VIDEO_SUFFIXES={".mp4",".mov",".mkv",".webm"}
 ACTIONS=("transcribe","analyze","export","summary","notes","document","timestamp_document","punctuate")
 DOCUMENT_ARTIFACT_KEYS=("subtitle","html","full_html","markdown","full_markdown","timestamp_markdown","transcript")
@@ -334,10 +334,16 @@ class Workbench:
         self.remote_model_used=False
         self.write_lock=threading.RLock()
         self.index_lock=threading.RLock()
+        self.auto_scan_lock=threading.Lock()
+        self.auto_scan_wake=threading.Event()
+        self.auto_scan_stop=threading.Event()
+        self.auto_scan_last={"checked_at":"","message":"尚未扫描"}
         self.catalog_path=self.root/"catalog.json"
         self.batches_path=self.root/"batches.json"
+        self.task_history_path=self.root/"task_history.json"
         self.catalog=json.loads(self.catalog_path.read_text(encoding="utf-8")) if self.catalog_path.exists() else {}
         self.batches=json.loads(self.batches_path.read_text(encoding="utf-8")) if self.batches_path.exists() else {}
+        self.task_history=json.loads(self.task_history_path.read_text(encoding="utf-8")) if self.task_history_path.exists() else []
         for pid in list(self.catalog):
             try: project=self.read(pid,"project.json")
             except (FileNotFoundError,ValueError,OSError): continue
@@ -464,6 +470,18 @@ class Workbench:
                     if not isinstance(value,dict): raise ValueError("任务模型选择格式错误")
                     changes[key]=value
                     continue
+                if key=="watch_folders":
+                    if not isinstance(value,list) or len(value)>20: raise ValueError("自动扫描最多支持 20 个文件夹")
+                    folders=[]; seen=set()
+                    for item in value:
+                        if not isinstance(item,str) or not item.strip(): raise ValueError("自动扫描文件夹格式无效")
+                        path=Path(item).expanduser()
+                        if not path.is_absolute() or not path.is_dir(): raise ValueError("自动扫描文件夹须为已存在的绝对路径")
+                        resolved=str(path.resolve())
+                        if os.path.normcase(resolved) not in seen:
+                            seen.add(os.path.normcase(resolved)); folders.append(resolved)
+                    changes[key]=folders
+                    continue
                 if key.endswith("_command") and (not isinstance(value,list) or len(value)>30): raise ValueError("外部工具命令须为参数数组")
                 if not key.endswith("_command") and not isinstance(value,str): raise ValueError("配置格式错误")
                 if key=="output_mode" and value not in ("data","source","custom"): raise ValueError("项目保存方式无效")
@@ -549,6 +567,7 @@ class Workbench:
               or self.settings.get("base_url","")!=previous_base):
             self.api_key=""
         self._save_json(self.settings_path,self.settings)
+        if "watch_folders" in changes: self.auto_scan_wake.set()
 
     def public_settings(self):
         result=self.settings.copy()
@@ -562,7 +581,26 @@ class Workbench:
         result["api_key_set"]=bool(self.api_key)
         result["bilibili_login_configured"]=self.bilibili_cookies_path.is_file()
         result["folder_setup_required"]=self.folder_setup_required
+        result["auto_scan_last"]=self.auto_scan_last.copy()
         return result
+    def list_task_history(self):
+        with self.index_lock:
+            return list(reversed(self.task_history[-1000:]))
+    def record_task(self,pid,mode):
+        project=self.read(pid,"project.json")
+        ended=time.strftime("%Y-%m-%d %H:%M:%S")
+        project["last_finished_at"]=ended
+        self.write(pid,"project.json",project)
+        row={"project_id":pid,"name":project.get("name",""),"imported_at":project.get("created",""),
+             "ended_at":ended,"mode":mode,"status":project.get("status",""),
+             "batch_id":project.get("batch_id","")}
+        with self.index_lock:
+            self.task_history.append(row)
+            del self.task_history[:-10000]
+            self._save_json(self.task_history_path,self.task_history)
+    def _record_task_safely(self,pid,mode):
+        try: self.record_task(pid,mode)
+        except (OSError,ValueError,FileNotFoundError): pass
     def folder(self,pid):
         uuid.UUID(pid)
         path=Path(self.catalog.get(pid,self.root/pid)).resolve()
@@ -670,6 +708,75 @@ class Workbench:
         self.batches[bid]["step"]=f"已导入 {len(self.batches[bid]['projects'])} 个视频"
         self._save_json(self.batches_path,self.batches)
         return {"batch_id":bid,"count":len(self.batches[bid]["projects"]),"skipped":skipped}
+    def auto_scan_once(self):
+        if not self.auto_scan_lock.acquire(blocking=False): return
+        try:
+            if not self.settings.get("watch_folders"): return
+            if self.busy.locked(): return
+            pending=next((row for row in self.batches.values() if row.get("auto_scan")
+                          and row.get("status")=="imported" and row.get("projects")),None)
+            if pending:
+                self.launch_batch(pending["id"],"finish_all")
+                return
+            known=set()
+            for pid in list(self.catalog):
+                try: source=self.read(pid,"project.json").get("source_path","")
+                except (OSError,ValueError,FileNotFoundError): continue
+                if source: known.add(os.path.normcase(str(Path(source).resolve())))
+            candidates=[]; now=time.time()
+            video_output=Path(self.settings.get("video_output_dir") or self.root/"exports"/"videos").resolve()
+            for folder in self.settings.get("watch_folders",[]):
+                directory=Path(folder)
+                if not directory.is_dir(): continue
+                for path in sorted(directory.iterdir(),key=lambda item:item.name.lower()):
+                    if len(candidates)>=500: break
+                    if not path.is_file() or path.is_symlink() or path.suffix.lower() not in VIDEO_SUFFIXES: continue
+                    if path.parent.resolve()==video_output: continue
+                    key=os.path.normcase(str(path.resolve()))
+                    if key in known: continue
+                    try: stat=path.stat()
+                    except OSError: continue
+                    if stat.st_size<=0 or now-stat.st_mtime<60: continue
+                    known.add(key); candidates.append(path)
+            checked=time.strftime("%Y-%m-%d %H:%M:%S")
+            if not candidates:
+                self.auto_scan_last={"checked_at":checked,"message":"没有新视频"}
+                return
+            bid=self.create_batch("自动扫描_"+time.strftime("%Y%m%d_%H%M%S"),group_output=True)
+            self.batches[bid]["auto_scan"]=True
+            self._save_json(self.batches_path,self.batches)
+            skipped=[]
+            for path in candidates:
+                try:
+                    pid=self.create(path.name,None,path.stat().st_size,path,bid)
+                    sidecar=next((path.with_suffix(ext) for ext in (".srt",".vtt") if path.with_suffix(ext).is_file()),None)
+                    if sidecar:
+                        try: self.subtitles(pid,sidecar.read_text(encoding="utf-8-sig"))
+                        except Exception as exc: self.status(pid,"error","同名字幕导入失败",str(exc)[:500])
+                except Exception as exc: skipped.append(f"{path.name}: {exc}")
+            count=len(self.batches[bid]["projects"])
+            self.batches[bid]["step"]=f"自动扫描导入 {count} 个视频"
+            if not count: self.batches[bid]["status"]="error"
+            self._save_json(self.batches_path,self.batches)
+            self.auto_scan_last={"checked_at":checked,"message":f"导入 {count} 个视频"+
+                                 (f"，跳过 {len(skipped)} 个" if skipped else "")}
+            if count: self.launch_batch(bid,"finish_all")
+        finally:
+            self.auto_scan_lock.release()
+    def start_auto_scan(self):
+        def loop():
+            self.auto_scan_wake.set()
+            while not self.auto_scan_stop.is_set():
+                self.auto_scan_wake.wait(3600)
+                self.auto_scan_wake.clear()
+                if self.auto_scan_stop.is_set(): break
+                try: self.auto_scan_once()
+                except Exception as exc:
+                    self.auto_scan_last={"checked_at":time.strftime("%Y-%m-%d %H:%M:%S"),"message":"扫描失败："+str(exc)[:200]}
+        threading.Thread(target=loop,name="WorkbenchAutoScan",daemon=True).start()
+    def stop_auto_scan(self):
+        self.auto_scan_stop.set()
+        self.auto_scan_wake.set()
     def import_bilibili(self,value):
         url=services.normalize_bilibili_url(value)
         if not self.bilibili_download_lock.acquire(blocking=False):
@@ -1179,6 +1286,7 @@ class Workbench:
                 self.progress(pid,action,"error",None,"失败："+str(exc)[:120])
                 self.status(pid,"error",action+"失败",str(exc)[:1500])
             finally:
+                self._record_task_safely(pid,action)
                 try:
                     self.finish_model_session(pid)
                 finally:
@@ -1289,6 +1397,7 @@ class Workbench:
                             self.progress(pid,"document","done",100,"转写、剪辑分析和图文文档已完成；未导出视频")
                             batch_label="生成文档"
                         self.status(pid,"ready","批量"+batch_label+"完成")
+                        self._record_task_safely(pid,mode)
                         batch["completed"]+=1
                     except services.OperationCancelled:
                         if action in ACTIONS:
@@ -1296,6 +1405,7 @@ class Workbench:
                         if mode=="document":
                             self.progress(pid,"document","stopped",None,"文档流程已停止")
                         self.status(pid,"stopped","批量处理已停止")
+                        self._record_task_safely(pid,mode)
                         stopped=True
                         batch.update(status="stopped",step=(
                             f"已停止 · 完成 {batch['completed']} · 失败 {batch['failed']} · "
@@ -1309,6 +1419,7 @@ class Workbench:
                         if mode=="document":
                             self.progress(pid,"document","error",None,"文档流程失败："+str(exc)[:120])
                         self.status(pid,"error","批量文档生成失败" if mode=="document" else "批量"+mode+"失败",str(exc)[:1500])
+                        self._record_task_safely(pid,mode)
                         batch["failed"]+=1
                     try:
                         project=self.read(pid,"project.json")
@@ -1405,6 +1516,7 @@ class Workbench:
                 if mode=="document": self.progress(pid,"document","error",None,"文档流程失败："+str(exc)[:120])
                 self.status(pid,"error","文档生成失败" if mode=="document" else "一键处理失败",str(exc)[:1500])
             finally:
+                self._record_task_safely(pid,mode)
                 try: self.finish_model_session(pid)
                 finally:
                     self.end_operation(pid)

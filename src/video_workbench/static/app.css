@@ -859,3 +859,10 @@ footer { padding: 35px 0 42px; color: #9a9da5; font-size: 12px; text-align: cent
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+.module-watch textarea { width: 100%; min-height: 120px; }
+.module-watch .field-inline { margin-top: 12px; }
+.history-table-wrap { overflow-x: auto; margin-top: 20px; }
+.history-table { width: 100%; border-collapse: collapse; min-width: 700px; }
+.history-table th, .history-table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #e5e5e9; vertical-align: top; }
+.history-table th { color: #6e6e73; font-size: 12px; }
+.history-table td { font-size: 13px; }

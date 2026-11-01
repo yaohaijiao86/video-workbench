@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import time
 import unittest
@@ -14,6 +15,39 @@ from examples.scene_pyscenedetect import scene_starts
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_auto_scan_imports_each_video_once_and_persists_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            source=root/"incoming"
+            source.mkdir()
+            video=source/"lesson.mp4"
+            video.write_bytes(b"video")
+            old=time.time()-120
+            os.utime(video,(old,old))
+            wb=Workbench(root/"data")
+            wb.save_settings({"watch_folders":[str(source),str(source)]})
+            self.assertEqual(len(wb.settings["watch_folders"]),1)
+            launches=[]
+            def launch(bid,mode):
+                launches.append((bid,mode))
+                wb.batches[bid]["status"]="ready"
+                wb._save_json(wb.batches_path,wb.batches)
+            with patch.object(wb,"launch_batch",side_effect=launch):
+                wb.auto_scan_once()
+                wb.auto_scan_once()
+            self.assertEqual(len(launches),1)
+            self.assertEqual(launches[0][1],"finish_all")
+            pid=wb.batches[launches[0][0]]["projects"][0]
+            wb.status(pid,"ready","一键处理完成")
+            wb.record_task(pid,"finish_all")
+            reopened=Workbench(root/"data")
+            row=reopened.list_task_history()[0]
+            self.assertEqual(row["name"],"lesson.mp4")
+            self.assertTrue(row["imported_at"])
+            self.assertTrue(row["ended_at"])
+            with patch.object(reopened,"launch_batch") as relaunch:
+                reopened.auto_scan_once()
+            relaunch.assert_not_called()
     def test_ffmpeg_can_probe_when_bundle_omits_ffprobe(self):
         stderr="Duration: 00:03:04.50, start: 0.000000, bitrate: 300 kb/s\nStream #0:0: Video: h264\nStream #0:1: Audio: aac"
         with patch.object(services,"executable",side_effect=[RuntimeError("missing"),"ffmpeg"]), patch.object(services.subprocess,"run",return_value=SimpleNamespace(stderr=stderr,stdout="")):
@@ -108,7 +142,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(wb.batches[bid]["completed"],2)
             with self.assertRaisesRegex(ValueError,"没有可处理的项目"):
                 wb.launch_batch(bid,"export")
-            for pid in (first,second): wb.write(pid,"media.json",{"duration":2,"has_audio":False})
+            for pid in (first,second): wb.write(pid,"media.json",{"duration":2,"has_audio":False,"video_bitrate":1000000})
             wb.save_decisions(first,[])
             with patch.object(wb,"task_export") as exporter:
                 wb.launch_batch(bid,"export")
@@ -127,7 +161,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             wb=Workbench(Path(directory))
             pid=wb.create("lesson.mp4",io.BytesIO(b"video"),5)
-            wb.write(pid,"media.json",{"duration":8,"has_audio":True})
+            wb.write(pid,"media.json",{"duration":8,"has_audio":True,"video_bitrate":1000000})
             wb.write(pid,"segments.json",[
                 {"id":"s1","start":0,"end":1,"text":"你好"},
                 {"id":"s2","start":1.1,"end":2,"text":"你好"},
@@ -147,7 +181,7 @@ class WorkspaceTests(unittest.TestCase):
                 calls.append("export")
                 selected={r["id"] for r in wb.read(project,"suggestions.json") if r["selected"]}
                 self.assertEqual(selected,{"d1","d2","d3"})
-            def summary(project): calls.append("summary")
+            def summary(project,summary_mode="detailed"): calls.append("summary")
             with patch.object(wb,"task_analyze",side_effect=analyze), patch.object(wb,"task_export",side_effect=export), patch.object(wb,"task_summary",side_effect=summary):
                 wb.launch_all(pid)
                 self._wait(wb)
@@ -156,6 +190,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(project["review_mode"],"automatic")
             self.assertEqual(project["auto_selected_count"],3)
             self.assertEqual(project["progress"]["export"]["percent"],100)
+            self.assertEqual(wb.list_task_history()[0]["mode"],"finish_all")
 
     def test_restart_marks_stale_running_project_interrupted(self):
         with tempfile.TemporaryDirectory() as directory:

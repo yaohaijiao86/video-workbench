@@ -194,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, {"supported": self.auth_supported, "password_required": self.password_required})
             if parts == ["api", "settings"]:
                 return self.respond(200, self.wb.public_settings())
+            if parts == ["api", "task-history"]:
+                return self.respond(200, self.wb.list_task_history())
             if parts == ["api", "task-control"]:
                 return self.respond(200, self.wb.task_control_status())
             if parts == ["api", "bilibili", "download-progress"]:
@@ -543,12 +545,14 @@ def main():
             server.server_close()
             parser.error(f"无法启动本机回环地址 127.0.0.1:{args.port}：{exc}")
         threading.Thread(target=local_server.serve_forever, name="WorkbenchLoopback", daemon=True).start()
+    Handler.wb.start_auto_scan()
     print(f"Video Workbench: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        Handler.wb.stop_auto_scan()
         if local_server is not None:
             local_server.shutdown()
             local_server.server_close()
