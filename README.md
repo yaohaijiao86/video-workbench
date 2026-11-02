@@ -30,6 +30,8 @@ Video Workbench 是一个本地优先的视频整理与剪辑辅助工具。它�
 - **源码包：**[video-workbench-v0.2.13-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.13/video-workbench-v0.2.13-source.zip)
 - **外部工具安装与配置：**[查看中文部署说明](docs/external-tools.md)
 - **安装与迁移手册：**[查看图文指南](docs/installation-migration-guide.html)
+- **本机文件盘点与清理建议：**[查看 Markdown 报告](docs/project-file-audit.md)
+- **整机迁移步骤：**[查看 Markdown 手册](docs/host-migration-guide.md)
 
 执行文件包含 Video Workbench 本身，不包含 FFmpeg、ASR/OCR 工具、场景检测器、模型文件、账号凭据或运行数据。
 
