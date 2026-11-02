@@ -2,9 +2,9 @@
 
 English: [README.en.md](README.en.md)。
 
-**Video Workbench 0.2.13 预览版**
+**Video Workbench 0.2.14 预览版**
 
-[直接下载 Windows 64 位 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.13/video-workbench-v0.2.13-windows-x64.exe) · [下载源码包](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.13/video-workbench-v0.2.13-source.zip) · [所有版本](https://github.com/yaohaijiao86/video-workbench/releases)
+[直接下载 Windows 64 位 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.14/video-workbench-v0.2.14-windows-x64.exe) · [下载源码包](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.14/video-workbench-v0.2.14-source.zip) · [所有版本](https://github.com/yaohaijiao86/video-workbench/releases)
 
 ## 项目目标
 
@@ -26,8 +26,8 @@ Video Workbench 是一个本地优先的视频整理与剪辑辅助工具。它�
 
 ## 下载
 
-- **Windows 64 位执行文件：**[点击直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.13/video-workbench-v0.2.13-windows-x64.exe)
-- **源码包：**[video-workbench-v0.2.13-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.13/video-workbench-v0.2.13-source.zip)
+- **Windows 64 位执行文件：**[点击直接下载 EXE](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.14/video-workbench-v0.2.14-windows-x64.exe)
+- **源码包：**[video-workbench-v0.2.14-source.zip](https://github.com/yaohaijiao86/video-workbench/releases/download/v0.2.14/video-workbench-v0.2.14-source.zip)
 - **外部工具安装与配置：**[查看中文部署说明](docs/external-tools.md)
 - **安装与迁移手册：**[查看图文指南](docs/installation-migration-guide.html)
 - **本机文件盘点与清理建议：**[查看 Markdown 报告](docs/project-file-audit.md)
